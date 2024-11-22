@@ -1,0 +1,1892 @@
+---
+title: "Redundancy analysis"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+
+Redundancy analysis with vegan to identify candidate climate-associated SNPs
+
+
+# Setup
+
+
+## load packages and data
+
+```{r setup}
+
+library('vegan') # redundancy analysis
+library('adegenet') # read.PLINK()
+library('psych') # pairs.panels()
+
+# going to follow this for a quick analysis!
+#https://popgen.nescent.org/2018-03-27_RDA_GEA.html
+
+# site data - named dat, needs to be renamed
+load('data/clean/CCGP_samples_channel_islands_clean.rda')
+info <- dat
+
+# use this to read SNPs!
+dat <- read.PLINK('data/raw/Qtom107.Qchr17.Qssp3.20220906.qlob.ef.repeatsOut.renamedChrsVars.biallelicSNPs.meanDP5.genoDP5.MAF0.01.missing0.9.ldPruned.additive.raw', n.cores = 2, quiet = F)
+
+# climate data
+load('/home/alayna/Documents/research/projects/2022_island_oak/data/clean/bioclim_locality_dataframe.rda')
+clim <- bclim.loc
+rm(bclim.loc)
+
+
+sessionInfo()
+
+```
+
+```{r markdown_settings}
+
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8)
+
+```
+
+## SNP data setup
+
+```{r snp_data_setup}
+
+# look at dataset
+# it omits the non-SNP info
+dat
+dim(dat)
+
+snps <-  as.matrix(dat)
+snps[1:10, 1:10]
+dim(snps)
+
+# optional - get a subset of SNPs for faster analysis, then run on whole dataset
+# snps <- snps[, sample(1:ncol(snps), 10000, replace = F)]
+
+```
+
+
+## sample data setup
+
+```{r data_setup}
+
+# get info only for the ones we have SNP data for
+
+# first check for any mismatches
+rownames(snps)[! rownames(snps) %in% info$ID_vcf]
+
+# get subset
+info <- info[match(rownames(snps), info$ID_vcf),]
+
+# check
+cbind(rownames(snps), info$ID_vcf, rownames(info))
+
+# rename SNP rows to match corrected names (info rownames)
+rownames(snps) <- rownames(info)
+
+# also get species abbreviation from name
+info$sp <- sapply(1:nrow(snps), function(x) strsplit(rownames(snps)[x], split = '.', fixed = T)[[1]][1])
+info$sp <- factor(info$sp)
+
+
+
+```
+
+
+## impute SNP data
+
+```{r impute}
+
+# need to impute missing data
+
+# proportion missing data - about 5%
+sum(is.na(snps))/length(unlist(snps))
+
+# missing data by individual
+sapply(1:nrow(snps), function(x) sum(is.na(snps[x,])))
+miss <- sapply(1:nrow(snps), function(x) sum(is.na(snps[x,]))/ncol(snps))
+missdf <- cbind(rownames(snps), miss)
+missdf[order(missdf[,2]),]
+
+
+# impute by most common snp
+imp <- apply(snps, 2, function(x) replace(x, is.na(x), as.numeric(names(which.max(table(x))))))
+sum(is.na(imp))
+
+#save(imp, file = 'data/clean/Qtom107.Qchr17.Qssp3.20220906.qlob.ef.repeatsOut.renamedChrsVars.biallelicSNPs.meanDP5.genoDP5.MAF0.01.missing0.9.ldPruned.additive_imputed.rda')
+#write.csv(imp, file = 'data/clean/Qtom107.Qchr17.Qssp3.20220906.qlob.ef.repeatsOut.renamedChrsVars.biallelicSNPs.meanDP5.genoDP5.MAF0.01.missing0.9.ldPruned.additive_imputed.csv', quote = F)
+
+```
+
+```{r check}
+
+# one last check that rows are in the same order...
+cbind(rownames(info), rownames(snps), rownames(imp))
+
+```
+
+# Simple PCA
+
+## plot functions
+
+```{r plot_functions}
+
+# functions to make different types of plots of RDA results
+
+# setup colors and points
+
+# color by island
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# point shape by species
+sp <- c(23, 22, 21)
+
+###
+# just plot the individuals (sites)
+plot_simple <- function(dat, info, choices = c(1,2), save = F, file_string, legend = F, legend_pos = 'topright'){
+  
+  if(save == T){
+    filename <- paste('rda_plot_indivs_', file_string, '_PC', choices[1], '_PC', choices[2], '.png', sep = '')
+    png(file = filename, width = 10, height = 9, res = 300, units = 'in')
+  }
+  
+  # the plot
+  plot(dat, type = 'n', choices = choices)
+  points(dat, pch = sp[info$sp], cex = 2, display = 'sites', bg = bg[info$island], col = 'black', choices = choices)
+  if(legend == T){
+    legend(legend_pos, legend = c(levels(info$sp), levels(info$island)), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), bg), cex = 1)
+  }
+  
+  
+  if(save == T){
+    dev.off()
+  }
+  
+}
+
+# plot individuals with climate
+
+plot_clim <- function(dat, info, choices = c(1,2), save = F, file_string, legend = F, legend_pos = 'topright'){
+
+  if(save == T){
+    filename <- paste('rda_plot_indivs_clim_', file_string, '_PC', choices[1], '_PC', choices[2], '.png', sep = '')
+    png(file = filename, width = 10, height = 9, res = 300, units = 'in')
+  }
+
+  # the plot
+  plot(dat, type = 'n', choices = choices)
+  points(dat, pch = sp[info$sp], cex = 2, display = 'sites', bg = bg[info$island], col = 'black', choices = choices)
+  text(dat, display = 'bp', choices = choices)
+  if(legend == T){
+    legend(legend_pos, legend = c(levels(info$sp), levels(info$island)), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), bg), cex = 1)
+  }
+
+
+  if(save == T){
+    dev.off()
+  }
+
+}
+
+
+```
+
+## All samples
+
+```{r pca_simple}
+
+# RDA with just SNP data
+# since this is not partial or constrained, this just runs a regular PCA
+# from help(rda): "If both matrices Z and Y are missing, the data matrix is analysed by ordinary correspondence analysis (or principal components analysis)."
+
+rda <- rda(imp, scale = T)
+
+rda
+#summary(rda)
+rda.info <- summary(rda)
+head(rda.info)
+screeplot(rda)
+
+
+# plot with functions!
+plot_simple(rda, info=info, legend = T, legend_pos = 'topleft', save = F, file_string = 'Qtom107.Qchr17.Qssp3')
+plot_simple(rda, info = info, choices = c(1,3), legend = F, legend_pos = 'topleft', save = F, file_string = 'Qtom107.Qchr17.Qssp3')
+
+# plot with text only
+
+#png(file = 'rda_plot_indivs_Qtom107.Qchr17.Qssp3_textIDs_PC1_PC2.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type = 'n')
+text(rda, cex = 1, display = 'sites', col = bg[info$island])
+legend('topleft', legend = levels(info$island), fill = bg, cex = 1)
+#dev.off()
+
+#png(file = 'rda_plot_indivs_Qtom107.Qchr17.Qssp3_textIDs_PC1_PC3.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type = 'n', choices = c(1,3))
+text(rda, choices = c(1,3), cex = 1, display = 'sites', col = bg[info$island])
+legend('topleft', legend = levels(info$island), fill = bg, cex = 1)
+#dev.off()
+
+
+
+```
+
+
+## without Guadalupe
+
+```{r subset_no_guadalupe}
+
+# since guadalupe appears divergent, make a PCA without it to show the relationships among other islands
+
+imp.sub <- imp[info$island != 'Guadalupe Island',]
+info.sub <- info[info$island != 'Guadalupe Island',]
+
+```
+
+```{r pca_simple_no_Guadalupe}
+
+# run and plot PCA
+
+# make sure they're all in the same order
+cbind(rownames(imp.sub), rownames(info.sub))
+
+rda <- rda(imp.sub, scale = T)
+
+plot_simple(rda, info = info.sub, legend = T, legend_pos = 'topleft', save = F, file_string = 'Qtom107.Qchr17.Qssp3_noGuadalupe')
+plot_simple(rda, info = info.sub, choices = c(1,3), legend = F, legend_pos = 'topright', save = F, file_string = 'Qtom107.Qchr17.Qssp3_noGuadalupe')
+
+#png(file = 'rda_plot_indivs_Qtom107.Qchr17.Qssp3_noGuadalupe_textIDs_PC1_PC2.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type = 'n')
+text(rda, cex = 1, display = 'sites', col = bg[info.sub$island])
+legend('topright', legend = levels(info$island), fill = bg, cex = 1)
+#dev.off()
+
+#png(file = 'rda_plot_indivs_textIDs_Qtom107.Qchr17.Qssp3_noGuadalupe_PC1_PC3.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type = 'n', choices = c(1,3))
+text(rda, choices = c(1,3), cex = 1, display = 'sites', col = bg[info.sub$island])
+#legend('bottomright', legend = levels(info$island), fill = bg, cex = 1)
+#dev.off()
+
+```
+
+# RDA with climate
+
+Now include both genetic and climate data
+
+## Basic RDA with all individuals and climate variables to visualize
+
+```{r clim_data_setup}
+
+# subsetting to get all individuals with snp and climate data
+# note: climate dataset has to be matched to rownames(info), rownames(snps) uses the info$id_vcf naming, which is different for some samples
+
+# get only individuals with climate data (some are missing)
+tmp.info <- info[rownames(info) %in% rownames(clim),]
+
+dim(tmp.info)
+dim(clim)
+
+# get climate for the individuals with snp data
+tmp.clim <- clim[match(rownames(tmp.info), rownames(clim)),]
+
+# they are in the same order
+dim(tmp.info)
+dim(tmp.clim)
+cbind(rownames(tmp.info), rownames(tmp.clim))
+
+# rename
+clim <- tmp.clim
+info <- tmp.info
+
+# remove the ones we don't have climate data for from snp dataset
+tmp.snps <- snps[rownames(snps) %in% rownames(info),]
+tmp.imp <- imp[rownames(imp) %in% rownames(info),]
+
+cbind(rownames(info), rownames(clim), rownames(tmp.snps), rownames(tmp.imp))
+
+# rename
+snps <- tmp.snps
+imp <- tmp.imp
+
+cbind(rownames(info), rownames(clim), rownames(snps), rownames(imp))
+  
+```
+
+
+```{r rda_clim}
+
+# first look at rda with climate
+# including guadalupe to visualize climate
+
+rda <- rda(imp ~ ., data = as.data.frame(clim), scale = T)
+screeplot(rda)
+
+plot_clim(rda, info = info, save = F, file_string = 'Qtom107.Qchr17.Qssp3')
+plot_clim(rda, info = info, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3')
+
+
+```
+
+## Basic RDA, visualize without Guadalupe
+
+```{r rda_clim_no_guad}
+
+# do same plot without Guadalupe
+
+# get subset 
+clim.sub <- clim[info$island != 'Guadalupe Island',]
+snps.sub <- snps[info$island != 'Guadalupe Island',]
+imp.sub <- imp[info$island != 'Guadalupe Island',]
+info.sub <- info[info$island != 'Guadalupe Island',]
+
+rda <- rda(imp.sub ~ ., data = as.data.frame(clim.sub), scale = T)
+screeplot(rda)
+
+plot_clim(rda, info = info.sub, save = F, file_string = 'Qtom107.Qchr17.Qssp3_noGuadalupe')
+plot_clim(rda, info = info.sub, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3_noGuadalupe')
+
+```
+
+
+## Basic RDA, visualize without Guadalupe or Mainland Qchr
+
+```{r rda_all_clim_vars_no_guad_no_Qchr}
+
+# same plot without Guadalupe or mainland Q. chrysolepis, only California Channel Islands
+
+# get subset without guadalupe or mainland Qchr
+clim.sub <- clim[! info$island %in% c('Guadalupe Island', "Mainland"),]
+snps.sub <- snps[! info$island %in% c('Guadalupe Island', "Mainland"),]
+imp.sub <- imp[! info$island %in% c('Guadalupe Island', "Mainland"),]
+info.sub <- info[! info$island %in% c('Guadalupe Island', "Mainland"),]
+
+cbind(rownames(info.sub), rownames(snps.sub), rownames(imp.sub), rownames(clim.sub))
+
+rda <- rda(imp.sub ~ ., data = as.data.frame(clim.sub), scale = T)
+screeplot(rda)
+
+plot_clim(rda, info = info.sub, save = F, file_string = 'Qtom107.Qchr17.Qssp3_noQchrGuadalupe')
+plot_clim(rda, info = info.sub, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3_noQchrGuadalupe')
+
+```
+
+## Basic RDA, visualize with only Guadalupe 
+
+```{r rda_all_clim_vars_only_guad}
+
+# same plot with only Guadalupe
+
+# get subset without guadalupe or mainland Qchr
+clim.sub <- clim[info$island == 'Guadalupe Island',]
+snps.sub <- snps[info$island == 'Guadalupe Island',]
+imp.sub <- imp[info$island == 'Guadalupe Island',]
+info.sub <- info[info$island == 'Guadalupe Island',]
+
+cbind(rownames(info.sub), rownames(snps.sub), rownames(imp.sub), rownames(clim.sub))
+
+rda <- rda(imp.sub ~ ., data = as.data.frame(clim.sub), scale = T)
+screeplot(rda)
+
+plot_clim(rda, info = info.sub, save = F, file_string = 'Qtom107.Qchr17.Qssp3_onlyGuadalupe')
+plot_clim(rda, info = info.sub, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3_onlyGuadalupe')
+
+```
+
+## Reduce Climate Variables
+
+```{r reduce_clim_vars}
+
+# reduce strongly correlated climate variables for use in final RDA
+
+# visualize correlations - all individuals
+pairs.panels(clim, scale = T)
+heatmap(abs(cor(clim)), scale = 'none')
+
+# just the california channel islands
+# going to focus on this set because it's what I'll be using for landscape genomics
+# get subset without guadalupe or mainland Qchr
+clim.sub <- clim[! info$island %in% c('Guadalupe Island', "Mainland"),]
+snps.sub <- snps[! info$island %in% c('Guadalupe Island', "Mainland"),]
+imp.sub <- imp[! info$island %in% c('Guadalupe Island', "Mainland"),]
+info.sub <- info[! info$island %in% c('Guadalupe Island', "Mainland"),]
+
+pairs.panels(clim.sub, scale = T)
+heatmap(abs(cor(clim.sub)), scale = 'none')
+
+
+# variables chosen by looking at loadings on pca and choosing one important var from each correlated group
+# these also seem biologically important and include both temp and precip vars
+vars <- c('bio5', 'bio6', 'bio15', 'bio18', 'bio19', 'elev')
+heatmap(abs(cor(clim.sub[,vars])), scale = 'none')
+pairs.panels(clim.sub[,vars], scale = T)
+
+# BIO5 = Max Temperature of Warmest Month
+# BIO6 = Min Temperature of Coldest Month
+# BIO15 = Precipitation Seasonality (Coefficient of Variation)
+# BIO18 = Precipitation of Warmest Quarter
+# BIO19 = Precipitation of Coldest Quarter
+
+
+
+```
+
+
+# Variance partitioning - all individuals
+
+```{r varpart}
+
+# this can take a lot of memory, clear unused memory
+gc()
+
+##############
+# this is running on all individuals
+
+
+# add geographic info via lat/lon
+
+lat <- info$lat
+lon <- info$lon
+
+geo <- cbind(lat, lon)
+
+pairs.panels(cbind(lat, lon, clim[,vars]), scale = T)
+
+rda <- rda(imp ~ ., data = as.data.frame(clim[,vars]) + lat + lon, scale = T)
+rda
+screeplot(rda)
+
+# variance partitioning 
+# will not run if scale = T
+# Error in qr.fitted(Q, Y) : NA/NaN/Inf in foreign function call (arg 5)
+part <- varpart(imp, geo, clim[,vars])
+
+
+
+# rdas
+# values are from the subset of 10000 snps
+# update 11/25: run on all snps
+
+rda.full <- rda(imp ~ clim[,vars] + geo, scale = T)
+RsquareAdj(rda.full) # 0.048143
+rda.full.info <- summary(rda.full)
+
+head(rda.full.info)
+
+rda.full.info$cont$importance
+rda.full.info$concont$importance
+
+
+# Partitioning of correlations:
+#               Inertia Proportion
+# Total          585267     1.0000
+# Constrained     63830     0.1091
+# Unconstrained  521437     0.8909
+
+rda.clim_not_geo <- rda(imp ~ clim[,vars] + Condition(geo), scale = T)
+RsquareAdj(rda.clim_not_geo) # 0.02905444
+
+rda.geo_not_clim <- rda(imp ~ geo + Condition(clim[,vars]), scale = T)
+RsquareAdj(rda.geo_not_clim) # 0.007226599
+
+
+# significance testing
+# note that these values may vary slightly between runs because the method uses permutations
+sig.full <- anova.cca(rda.full, permutations=99)
+sig.full
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp ~ clim[, vars] + geo, scale = T)
+#           Df Variance      F Pr(>F)   
+# Model      8    63830 1.7903   0.01 **
+# Residual 117   521437                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+sig.clim_not_geo <- anova.cca(rda.clim_not_geo, permutations=99)
+sig.clim_not_geo
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp ~ clim[, vars] + Condition(geo), scale = T)
+#           Df Variance      F Pr(>F)   
+# Model      6    43473 1.6257   0.01 **
+# Residual 117   521437                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+
+sig.geo_not_clim <- anova.cca(rda.geo_not_clim, permutations=99)
+sig.geo_not_clim
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp ~ geo + Condition(clim[, vars]), scale = T)
+#           Df Variance      F Pr(>F)   
+# Model      2    12940 1.4517   0.01 **
+# Residual 117   521437                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+gc()
+
+```
+
+# GEA analysis, all Q. tomentella
+
+## RDA of SNPs and climate
+
+```{r rda_clim_all_Qtom}
+
+# here we'll use the subset climate variables to do a more detailed GEA
+
+# with all samples except Mainland Qchr
+# Qchr on islands seems to be highly introgressed with Qtom, so including all island individuals together
+
+# get subset without mainland
+clim.sub <- clim[! info$island %in% c('Mainland'),]
+snps.sub <- snps[! info$island %in% c('Mainland'),]
+imp.sub <- imp[! info$island %in% c('Mainland'),]
+info.sub <- info[! info$island %in% c('Mainland'),]
+
+rda <- rda(imp.sub ~ ., data = as.data.frame(clim.sub[,vars]), scale = T)
+screeplot(rda)
+rda
+rda.info <- summary(rda)
+head(rda.info)
+
+RsquareAdj(rda)
+# $r.squared
+# [1] 0.08954806
+# $adj.r.squared
+# [1] 0.03988705
+
+# colors
+cols <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+plot_clim(rda, info = info.sub, save = F, file_string = 'Qtom107.Qchr17.Qssp3_GEA_noQchr')
+plot_clim(rda, info = info.sub, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3_GEA_noQchr')
+
+
+plot(rda, type = 'none')
+points(rda, display = 'sites', pch = sp[info.sub$sp], bg = bg[info.sub$island], col = 'black', cex = 1.5)
+text(rda, display = 'bp')
+points(rda, display = 'species', pch = 21, cex = 1, col = 'gray32')
+
+```
+
+
+
+## identify candidate SNPs from RDA outliers
+
+```{r climate_cors_all_Qtom}
+
+# again basically following Forester et al
+
+# most variation explained by first three axes (~5.7% out of 9% unadjusted)
+screeplot(rda)
+summary(rda)$cont
+
+# get SNP loadings for first 3 axes
+load.rda <- scores(rda, choices=c(1:3), display="species")
+
+hist(load.rda[,1], main="Loadings on RDA1")
+hist(load.rda[,2], main="Loadings on RDA2")
+hist(load.rda[,3], main="Loadings on RDA3") 
+
+outliers <- function(x,z){
+  
+  lims <- mean(x) + c(-1, 1) * z * sd(x) # find loadings +/-z sd from mean loading  
+  x[x < lims[1] | x > lims[2]] # locus names in these tails
+  
+}
+
+# start out with a cutoff of 4 std dev because there are a lot of snps
+cand1 <- outliers(load.rda[,1],4)
+cand2 <- outliers(load.rda[,2],4)
+cand3 <- outliers(load.rda[,3],4)
+
+length(cand1)
+length(cand2)
+length(cand3)
+
+ncand <- length(cand1) + length(cand2) + length(cand3)
+ncand
+
+
+# set up results
+
+cand1 <- cbind.data.frame(rep(1,times=length(cand1)), names(cand1), unname(cand1))
+cand2 <- cbind.data.frame(rep(2,times=length(cand2)), names(cand2), unname(cand2))
+cand3 <- cbind.data.frame(rep(3,times=length(cand3)), names(cand3), unname(cand3))
+
+colnames(cand1) <- colnames(cand2) <- colnames(cand3) <- c("axis","snp","loading")
+
+cand <- rbind(cand1, cand2, cand3)
+cand$snp <- as.character(cand$snp)
+
+# get correlations of SNPs with climate
+tmp <- matrix(nrow=(ncand), ncol=ncol(clim.sub[,vars]))
+
+colnames(tmp) <- colnames(clim.sub[,vars])
+
+for (i in 1:length(cand$snp)) {
+  
+  nam <- cand$snp[i] # loop through candidate snp names
+  snp.gen <- imp.sub[,nam]
+  tmp[i,] <- apply(clim.sub[,vars], 2, function(x) cor(x,snp.gen))
+}
+
+cand <- cbind.data.frame(cand, tmp)
+head(cand)
+
+
+#  check for duplicate snps - outliers on multiple axes
+length(cand$snp[duplicated(cand$snp)]) # 0 - so skip below
+
+# foo <- cbind(cand$axis, duplicated(cand$snp)) 
+# table(foo[foo[,1]==1,2]) # no duplicates on axis 1
+# table(foo[foo[,1]==2,2]) #  6 duplicates on axis 2
+# table(foo[foo[,1]==3,2]) # no duplicates on axis 3
+# 
+# cand <- cand[!duplicated(cand$snp),] # remove duplicate detections
+
+dim(cand) # 1353 SNPs
+
+# get best climate correlation for each snp
+# note: need to modify the columns if different climate variables are used
+
+for (i in 1:length(cand$snp)) {
+  
+  row <- cand[i,]
+  cand[i, 10] <- names(which.max(abs(row[vars]))) # gives the variable
+  cand[i, 11] <- max(abs(row[vars]))              # gives the correlation
+}
+
+colnames(cand)[10] <- "predictor"
+colnames(cand)[11] <- "correlation"
+
+table(cand$predictor)
+# bio15 bio18 bio19  bio5  bio6  elev 
+#    47    73   174    88    23   155
+
+# bio15 bio18 bio19  bio5  bio6  elev 
+#   585    55   222    36   437    18
+
+########
+# plot!
+
+# colors
+sel <- cand$snp
+env <- cand$predictor
+
+colset <- c("#d64b15","#013479","#ffb90f","#22a27c","#b1e3ad","#7d9ceb")
+env[env=="bio5"] <- colset[1] # Max Temperature of Warmest Month
+env[env=="bio6"] <- colset[2] # Min Temperature of Coldest Month
+env[env=="bio15"] <- colset[3] # Precipitation Seasonality (Coefficient of Variation)
+env[env=="bio18"] <- colset[4] # Precipitation of Warmest Quarter
+env[env=="bio19"] <- colset[5] # Precipitation of Coldest Quarter
+env[env=="elev"] <- colset[6]
+
+# color by predictor:
+col.pred <- rownames(rda$CCA$v) # pull the SNP names
+
+for (i in 1:length(sel)) {           # color code candidate SNPs
+  foo <- match(sel[i],col.pred)
+  col.pred[foo] <- env[i]
+}
+
+# set color for non-candidate snps
+# change if they don't already have a color
+col.pred[! col.pred %in% colset] <- '#f1eef6' # non-candidate SNPs
+empty <- col.pred
+empty[grep("#f1eef6",empty)] <- rgb(0,1,0, alpha=0) # transparent
+empty.outline <- ifelse(empty=="#00FF0000","#00FF0000","gray32")
+bg <- colset
+
+# now plot
+
+# axes 1 & 2
+#png(file = 'rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_noQchr_PC1_PC2.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3)
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3)
+text(rda, scaling=3, display="bp", cex=1)
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+#dev.off()
+
+# axes 1 & 3
+#png(file = 'rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_noQchr_PC1_PC3.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1), choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3, choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3, choices=c(1,3))
+text(rda, scaling=3, display="bp", cex=1, choices=c(1,3))
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+#dev.off()
+
+
+# save
+
+# write.table(cand, 'results/redundancy_analysis/RDA_candidate_climate_SNP_table_noQchr.csv', row.names = F, quote = F)
+# save(cand, file = 'results/redundancy_analysis/RDA_candidate_climate_SNP_table_noQchr.rda')
+
+```
+
+```{r look_at_snps_allQtom}
+
+cand.sort <- cand[order(cand$correlation, decreasing = T),]
+
+
+# colors
+cols <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# plot just one
+# snp <- cand.sort$snp[1]
+# cli <- cand.sort$predictor[1]
+# plot(jitter(snps.sub[,snp], 0.3), clim.sub[,cli],
+#      main = snp,
+#      ylab = cli,
+#      xlab = 'genotype',
+#      bg = cols[info.sub$island],
+#      col = 'black',
+#      pch = 21,
+#      cex = 1)
+
+
+
+# plot more
+top <- min(96, nrow(cand.sort))
+
+#dev.new()
+par(mfrow = c(4,6))
+par(mar = c(3,4,2,1))
+
+for(n in 1:top){
+  
+  snp <- cand.sort$snp[n]
+  cli <- cand.sort$predictor[n]
+  plot(jitter(snps.sub[,snp], 0.3),
+       clim.sub[,cli],
+       main = snp,
+       ylab = cli,
+       xlab = 'genotype',
+       bg = cols[info.sub$island],
+       col = 'black',
+       pch = 21,
+       cex = 1.2)
+}
+
+
+# to save
+
+# set = 1
+# for(n in 1:top){
+#   
+#   # start a new plot every 24
+#   if(n %% 24 == 1){
+#     
+#     png(file = paste('results/redundancy_analysis/RDA_SNP-climate_cors_noQchr_set_', set, '.png', sep = ''),
+#         height = 10, width = 16,
+#         units = 'in',
+#         res = 300)
+#     
+#     par(mfrow = c(4,6))
+#     par(mar = c(3,4,2,1))
+#   }
+# 
+#   
+#   snp <- cand.sort$snp[n]
+#   cli <- cand.sort$predictor[n]
+#   plot(jitter(snps.sub[,snp], 0.3),
+#        clim.sub[,cli],
+#        main = snp,
+#        ylab = cli,
+#        xlab = 'genotype',
+#        bg = cols[info.sub$island],
+#        col = 'black',
+#        pch = 21,
+#        cex = 1)
+#   
+#   if(n %% 24 == 0){
+#     dev.off()
+#     set = set+1
+#   }
+#   
+# }
+
+# looking at variation among islands to see how island structure might affect candidate SNPs
+# if an island has both copies of a variant (it's not fixed), it will be easier for selection to act on it
+# if islands are fixed for variants, it will be harder to tell whether differentiation is neutral or adaptive
+
+# which islands have both copies of the variant?
+
+snps_not_fixed <- as.data.frame(matrix(nrow = nrow(cand.sort), ncol = 6))
+rownames(snps_not_fixed) <- cand.sort$snp
+colnames(snps_not_fixed) <- c("Santa Rosa Island", "Santa Cruz Island", "Anacapa Island", "Catalina Island", "San Clemente Island", "Guadalupe Island")
+
+for(n in 1:nrow(cand.sort)){
+  
+  snp <- cand.sort$snp[n]
+  
+  # df with snp copies and island
+  df <- data.frame(copies = snps.sub[,snp], island = info.sub$island)
+  
+  # relevel island factors
+  df$island <- factor(df$island, exclude = 'Mainland')
+  
+  # loop through islands
+  for(i in 1:nlevels(df$island)){
+    
+    island <- levels(df$island)[i]
+    df.isl <- df[df$island == island,]
+    
+    # which copy numbers exist in this island?
+    copies <- na.omit(df.isl$copies)
+    
+    # does the variant vary within this island?
+    # first check for heterozygotes
+    if(1 %in% copies){
+      not_fixed_bool <- 1
+      #if no heterozygotes, check whether both homozygotes exist
+    } else if(0 %in% copies & 2 %in% copies){
+      not_fixed_bool <- 1
+      # if not, variant is fixed on island
+    } else{
+      not_fixed_bool <- 0
+    }
+    
+    # save to dataframe
+    snps_not_fixed[snp, island] <- not_fixed_bool
+    
+  }
+  
+}
+
+
+head(snps_not_fixed)
+par(mfrow = c(1,1))
+# number of islands with variation in each candidate SNP
+# most SNPs are only variable on one island
+# 114 SNPs (~8%) are variable at all 3 islands
+hist(rowSums(snps_not_fixed))
+table(rowSums(snps_not_fixed))
+
+# how many snps are variable at each island?
+# this is pretty consistent with observed heterozygosity metrics
+barplot(colSums(snps_not_fixed))
+
+```
+
+# GEA analysis, without Guadalupe or Mainaland Qchr
+
+## RDA of SNPs and climate
+
+```{r rda_clim_no_guad_no_Qchr}
+
+# here we'll use the subset climate variables to do a more detailed GEA
+
+# get subset without guadalupe
+clim.sub <- clim[! info$island %in% c('Guadalupe Island', "Mainland"),]
+snps.sub <- snps[! info$island %in% c('Guadalupe Island', "Mainland"),]
+imp.sub <- imp[! info$island %in% c('Guadalupe Island', "Mainland"),]
+info.sub <- info[! info$island %in% c('Guadalupe Island', "Mainland"),]
+
+rda <- rda(imp.sub ~ ., data = as.data.frame(clim.sub[,vars]), scale = T)
+screeplot(rda)
+rda
+rda.info <- summary(rda)
+
+head(rda.info)
+rda.info$cont$importance
+rda.info$concont$importance
+
+RsquareAdj(rda)
+# $r.squared
+# [1] 0.09138727
+# $adj.r.squared
+# [1] 0.0294364
+
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+plot_clim(rda, info = info.sub, save = F, file_string = 'Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupe')
+plot_clim(rda, info = info.sub, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupe')
+
+
+plot(rda, type = 'none')
+points(rda, display = 'sites', pch = sp[info.sub$sp], bg = bg[info.sub$island], col = 'black', cex = 1.5)
+text(rda, display = 'bp')
+points(rda, display = 'species', pch = 21, cex = 1, col = 'gray32')
+
+```
+
+
+## Variance partitioning - only Channel Islands samples
+
+```{r varpart_subset}
+
+# rdas
+# without mainland Qchr  or guadalupe
+clim.sub <- clim[! info$island %in% c('Guadalupe Island', "Mainland"),]
+snps.sub <- snps[! info$island %in% c('Guadalupe Island', "Mainland"),]
+imp.sub <- imp[! info$island %in% c('Guadalupe Island', "Mainland"),]
+info.sub <- info[! info$island %in% c('Guadalupe Island', "Mainland"),]
+
+# 2022-11-30: values are from all snps
+
+# geography
+lat <- info.sub$lat
+lon <- info.sub$lon
+
+geo <- cbind(lat, lon)
+
+rda.full <- rda(imp.sub ~ clim.sub[,vars] + geo, scale = T)
+RsquareAdj(rda.full) # 0.03796603
+rda.full.info <- summary(rda.full)
+head(rda.full.info)
+rda.full.info$cont$importance
+rda.full.info$concont$importance
+
+# Partitioning of correlations:
+#               Inertia Proportion
+# Total          570231     1.0000
+# Constrained     68337     0.1198
+# Unconstrained  501894     0.8802
+sig.full <- anova.cca(rda.full, permutations = 99)
+sig.full
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp.sub ~ clim.sub[, vars] + geo, scale = T)
+#          Df Variance      F Pr(>F)   
+# Model     8    68337 1.4637   0.01 **
+# Residual 86   501894                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+rda.clim_not_geo <- rda(imp.sub ~ clim.sub[,vars] + Condition(geo), scale = T)
+RsquareAdj(rda.clim_not_geo) # 0.02338488
+sig.clim_not_geo <- anova.cca(rda.clim_not_geo, permutations = 99)
+sig.clim_not_geo
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp.sub ~ clim.sub[, vars] + Condition(geo), scale = T)
+#          Df Variance      F Pr(>F)   
+# Model     6    48067 1.3727   0.01 **
+# Residual 86   501894                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+rda.geo_not_clim <- rda(imp.sub ~ geo + Condition(clim.sub[,vars]), scale = T)
+RsquareAdj(rda.geo_not_clim) # 0.008529629
+sig.geo_not_clim <- anova.cca(rda.geo_not_clim, permutations = 99)
+sig.geo_not_clim
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp.sub ~ geo + Condition(clim.sub[, vars]), scale = T)
+#          Df Variance      F Pr(>F)   
+# Model     2    16225 1.3901   0.01 **
+# Residual 86   501894                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+rda.clim <- rda(imp.sub ~ clim.sub[,vars], scale = T)
+RsquareAdj(rda.clim) #[1] 0.0294364
+sig.clim <- anova.cca(rda.clim, permutations = 99)
+sig.clim
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp.sub ~ clim.sub[, vars], scale = T)
+#          Df Variance      F Pr(>F)   
+# Model     6    52112 1.4752   0.01 **
+# Residual 88   518119                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+rda.geo <- rda(imp.sub ~ geo, scale = T)
+RsquareAdj(rda.geo) # 0.01458115
+sig.geo <- anova.cca(rda.geo, permutations = 99)
+sig.geo
+
+# Permutation test for rda under reduced model
+# Permutation: free
+# Number of permutations: 99
+# 
+# Model: rda(formula = imp.sub ~ geo, scale = T)
+#          Df Variance      F Pr(>F)   
+# Model     2    20270 1.6955   0.01 **
+# Residual 92   549961                 
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+
+```
+
+## identify candidate SNPs from RDA outliers
+
+```{r GEA_channel_noQchr_guadalupe}
+
+# we identify climate SNPs as those that are outliers along the RDA axes
+# then determine which climate variable each SNP is most associated with (because this is a multivariate analysis, they will often associate with multiple)
+
+# again basically following Forester et al
+
+# most variation explained by first three axes (~5% out of 9% unadjusted)
+screeplot(rda)
+summary(rda)$cont
+
+# get SNP loadings for first 3 axes
+load.rda <- scores(rda, choices=c(1:3), display="species")
+
+hist(load.rda[,1], main="Loadings on RDA1")
+hist(load.rda[,2], main="Loadings on RDA2")
+hist(load.rda[,3], main="Loadings on RDA3") 
+
+outliers <- function(x,z){
+  
+  lims <- mean(x) + c(-1, 1) * z * sd(x) # find loadings +/-z sd from mean loading  
+  x[x < lims[1] | x > lims[2]] # locus names in these tails
+  
+}
+
+# start out with a cutoff of 4 std dev because there are a lot of snps
+cand1 <- outliers(load.rda[,1],4)
+cand2 <- outliers(load.rda[,2],4)
+cand3 <- outliers(load.rda[,3],4)
+
+length(cand1)
+length(cand2)
+length(cand3)
+
+ncand <- length(cand1) + length(cand2) + length(cand3)
+ncand
+
+
+# set up results
+
+cand1 <- cbind.data.frame(rep(1,times=length(cand1)), names(cand1), unname(cand1))
+cand2 <- cbind.data.frame(rep(2,times=length(cand2)), names(cand2), unname(cand2))
+cand3 <- cbind.data.frame(rep(3,times=length(cand3)), names(cand3), unname(cand3))
+
+colnames(cand1) <- colnames(cand2) <- colnames(cand3) <- c("axis","snp","loading")
+
+cand <- rbind(cand1, cand2, cand3)
+cand$snp <- as.character(cand$snp)
+
+# get correlations of SNPs with climate
+tmp <- matrix(nrow=(ncand), ncol=ncol(clim.sub[,vars]))
+
+colnames(tmp) <- colnames(clim.sub[,vars])
+
+for (i in 1:length(cand$snp)) {
+  
+  nam <- cand$snp[i] # loop through candidate snp names
+  snp.gen <- imp.sub[,nam]
+  tmp[i,] <- apply(clim.sub[,vars], 2, function(x) cor(x,snp.gen))
+}
+
+cand <- cbind.data.frame(cand, tmp)
+head(cand)
+
+
+#  check for duplicate snps - outliers on multiple axes
+length(cand$snp[duplicated(cand$snp)]) # 6
+
+foo <- cbind(cand$axis, duplicated(cand$snp)) 
+table(foo[foo[,1]==1,2]) # no duplicates on axis 1
+table(foo[foo[,1]==2,2]) #  6 duplicates on axis 2
+table(foo[foo[,1]==3,2]) # no duplicates on axis 3
+
+cand <- cand[!duplicated(cand$snp),] # remove duplicate detections
+
+dim(cand) # 1472 SNPs
+
+# get best climate correlation for each snp
+# note: need to modify the columns if different climate variables are used
+
+for (i in 1:length(cand$snp)) {
+  
+  row <- cand[i,]
+  cand[i, 10] <- names(which.max(abs(row[vars]))) # gives the variable
+  cand[i, 11] <- max(abs(row[vars]))              # gives the correlation
+}
+
+colnames(cand)[10] <- "predictor"
+colnames(cand)[11] <- "correlation"
+
+table(cand$predictor)
+# bio15 bio18 bio19  bio5  bio6  elev 
+#   108    53    22   915    49   325 
+
+########
+# plot!
+
+# colors
+sel <- cand$snp
+env <- cand$predictor
+
+colset <- c("#d64b15","#013479","#ffb90f","#22a27c","#b1e3ad","#7d9ceb")
+env[env=="bio5"] <- colset[1] # Max Temperature of Warmest Month
+env[env=="bio6"] <- colset[2] # Min Temperature of Coldest Month
+env[env=="bio15"] <- colset[3] # Precipitation Seasonality (Coefficient of Variation)
+env[env=="bio18"] <- colset[4] # Precipitation of Warmest Quarter
+env[env=="bio19"] <- colset[5] # Precipitation of Coldest Quarter
+env[env=="elev"] <- colset[6]
+
+# color by predictor:
+col.pred <- rownames(rda$CCA$v) # pull the SNP names
+
+for (i in 1:length(sel)) {           # color code candidate SNPs
+  foo <- match(sel[i],col.pred)
+  col.pred[foo] <- env[i]
+}
+
+# set color for non-candidate snps
+# change if they don't already have a color
+col.pred[! col.pred %in% colset] <- '#f1eef6' # non-candidate SNPs
+empty <- col.pred
+empty[grep("#f1eef6",empty)] <- rgb(0,1,0, alpha=0) # transparent
+empty.outline <- ifelse(empty=="#00FF0000","#00FF0000","gray32")
+bg <- colset
+
+# now plot
+
+# axes 1 & 2
+#png(file = 'rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupe_PC1_PC2.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3)
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3)
+text(rda, scaling=3, display="bp", cex=1)
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+#dev.off()
+
+# axes 1 & 3
+png(file = 'rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupe_PC1_PC3.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1), choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3, choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3, choices=c(1,3))
+text(rda, scaling=3, display="bp", cex=1, choices=c(1,3))
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+dev.off()
+
+```
+
+
+
+```{r look_at_snps_noQchrGuadalupe}
+
+cand.sort <- cand[order(cand$correlation, decreasing = T),]
+
+
+# colors
+cols <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# plot just one
+# snp <- cand.sort$snp[1]
+# cli <- cand.sort$predictor[1]
+# plot(jitter(snps.sub[,snp], 0.3), clim.sub[,cli],
+#      main = snp,
+#      ylab = cli,
+#      xlab = 'genotype',
+#      bg = cols[info.sub$island],
+#      col = 'black',
+#      pch = 21,
+#      cex = 1)
+
+
+
+# plot more
+top <- min(96, nrow(cand.sort))
+
+#dev.new()
+par(mfrow = c(4,6))
+par(mar = c(3,4,2,1))
+
+for(n in 1:top){
+  
+  snp <- cand.sort$snp[n]
+  cli <- cand.sort$predictor[n]
+  plot(jitter(snps.sub[,snp], 0.3),
+       clim.sub[,cli],
+       main = snp,
+       ylab = cli,
+       xlab = 'genotype',
+       bg = cols[info.sub$island],
+       col = 'black',
+       pch = 21,
+       cex = 1)
+}
+
+
+# to save
+
+# set = 1
+# for(n in 1:top){
+#   
+#   # start a new plot every 24
+#   if(n %% 24 == 1){
+#     
+#     # png(file = paste('RDA_SNP-climate_cors_set_', set, '.png', sep = ''),
+#     #     height = 10, width = 16,
+#     #     units = 'in',
+#     #     res = 300)
+#     
+#     par(mfrow = c(4,6))
+#     par(mar = c(3,4,2,1))
+#   }
+# 
+#   
+#   snp <- cand.sort$snp[n]
+#   cli <- cand.sort$predictor[n]
+#   plot(jitter(snps.sub[,snp], 0.3),
+#        clim.sub[,cli],
+#        main = snp,
+#        ylab = cli,
+#        xlab = 'genotype',
+#        bg = cols[info.sub$island],
+#        col = 'black',
+#        pch = 21,
+#        cex = 1)
+#   
+#   if(n %% 24 == 0){
+#     #dev.off()
+#     set = set+1
+#   }
+#   
+# }
+
+```
+
+
+```{r save_candidate_SNPs_no_guadalupe}
+
+# write.table(cand.sort, 'results/RDA_candidate_climate_SNP_table_noGuad.csv', row.names = F, quote = F)
+# save(cand.sort, file = 'results/RDA_candidate_climate_SNP_table_noGuad.rda')
+
+```
+
+
+# GEA analysis, only Guadalupe
+
+## RDA of SNPs and climate
+
+```{r rda_clim_only_guad}
+
+par(mfrow = c(1,1))
+
+# here we'll use the subset climate variables to do a more detailed GEA
+
+# get subset, only guadalupe
+clim.sub <- clim[info$island == 'Guadalupe Island',]
+snps.sub <- snps[info$island == 'Guadalupe Island',]
+imp.sub <- imp[info$island == 'Guadalupe Island',]
+info.sub <- info[info$island == 'Guadalupe Island',]
+
+rda <- rda(imp.sub ~ ., data = as.data.frame(clim.sub[,vars]), scale = T)
+screeplot(rda)
+rda
+rda.info <- summary(rda)
+head(rda.info)
+RsquareAdj(rda)
+# $r.squared
+# [1] 0.3403542
+# $adj.r.squared
+# [1] 0.07649595
+
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+plot_clim(rda, info = info.sub, save = F, file_string = 'Qtom107.Qchr17.Qssp3_GEA_onlyGuadalupe')
+plot_clim(rda, info = info.sub, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3_onlyGuadalupe')
+
+
+plot(rda, type = 'none')
+points(rda, display = 'sites', pch = sp[info.sub$sp], bg = bg[info.sub$island], col = 'black', cex = 1.5)
+text(rda, display = 'bp')
+points(rda, display = 'species', pch = 21, cex = 1, col = 'gray32')
+
+```
+
+
+### identify candidate SNPs from RDA outliers
+
+```{r GEA_only_guad}
+
+# we identify climate SNPs as those that are outliers along the RDA axes
+# then determine which climate variable each SNP is most associated with (because this is a multivariate analysis, they will often associate with multiple)
+
+# again basically following Forester et al
+
+# most variation explained by first three axes (~20% out of 34% unadjusted)
+# a lot more variation explained here than in other sample sets
+screeplot(rda)
+summary(rda)$cont
+
+# get SNP loadings for first 3 axes
+load.rda <- scores(rda, choices=c(1:3), display="species")
+
+hist(load.rda[,1], main="Loadings on RDA1")
+hist(load.rda[,2], main="Loadings on RDA2")
+hist(load.rda[,3], main="Loadings on RDA3") 
+
+outliers <- function(x,z){
+  
+  lims <- mean(x) + c(-1, 1) * z * sd(x) # find loadings +/-z sd from mean loading  
+  x[x < lims[1] | x > lims[2]] # locus names in these tails
+  
+}
+
+# start out with a cutoff of 4 std dev because there are a lot of snps
+cand1 <- outliers(load.rda[,1],4)
+cand2 <- outliers(load.rda[,2],4)
+cand3 <- outliers(load.rda[,3],4)
+
+length(cand1)
+length(cand2)
+length(cand3)
+
+ncand <- length(cand1) + length(cand2) + length(cand3)
+ncand # 346
+
+
+# set up results
+
+cand1 <- cbind.data.frame(rep(1,times=length(cand1)), names(cand1), unname(cand1))
+cand2 <- cbind.data.frame(rep(2,times=length(cand2)), names(cand2), unname(cand2))
+cand3 <- cbind.data.frame(rep(3,times=length(cand3)), names(cand3), unname(cand3))
+
+colnames(cand1) <- colnames(cand2) <- colnames(cand3) <- c("axis","snp","loading")
+
+cand <- rbind(cand1, cand2, cand3)
+cand$snp <- as.character(cand$snp)
+
+# get correlations of SNPs with climate
+tmp <- matrix(nrow=(ncand), ncol=ncol(clim.sub[,vars]))
+
+colnames(tmp) <- colnames(clim.sub[,vars])
+
+for (i in 1:length(cand$snp)) {
+  
+  nam <- cand$snp[i] # loop through candidate snp names
+  snp.gen <- imp.sub[,nam]
+  tmp[i,] <- apply(clim.sub[,vars], 2, function(x) cor(x,snp.gen))
+}
+
+cand <- cbind.data.frame(cand, tmp)
+head(cand)
+
+
+#  check for duplicate snps - outliers on multiple axes
+length(cand$snp[duplicated(cand$snp)]) # 0
+# no duplicates, so skip below
+
+# foo <- cbind(cand$axis, duplicated(cand$snp)) 
+# table(foo[foo[,1]==1,2]) 
+# table(foo[foo[,1]==2,2])
+# table(foo[foo[,1]==3,2])
+# 
+# cand <- cand[!duplicated(cand$snp),] # remove duplicate detections
+
+dim(cand) # 346 SNPs
+
+# get best climate correlation for each snp
+# note: need to modify the columns if different climate variables are used
+
+for (i in 1:length(cand$snp)) {
+  
+  row <- cand[i,]
+  cand[i, 10] <- names(which.max(abs(row[vars]))) # gives the variable
+  cand[i, 11] <- max(abs(row[vars]))              # gives the correlation
+}
+
+colnames(cand)[10] <- "predictor"
+colnames(cand)[11] <- "correlation"
+
+table(cand$predictor)
+# bio15 bio19  bio5  bio6  elev 
+#     2     2   129   204     9 
+
+########
+# plot!
+
+# colors
+sel <- cand$snp
+env <- cand$predictor
+
+colset <- c("#d64b15","#013479","#ffb90f","#22a27c","#b1e3ad","#7d9ceb")
+env[env=="bio5"] <- colset[1] # Max Temperature of Warmest Month
+env[env=="bio6"] <- colset[2] # Min Temperature of Coldest Month
+env[env=="bio15"] <- colset[3] # Precipitation Seasonality (Coefficient of Variation)
+env[env=="bio18"] <- colset[4] # Precipitation of Warmest Quarter
+env[env=="bio19"] <- colset[5] # Precipitation of Coldest Quarter
+env[env=="elev"] <- colset[6]
+
+# color by predictor:
+col.pred <- rownames(rda$CCA$v) # pull the SNP names
+
+for (i in 1:length(sel)) {           # color code candidate SNPs
+  foo <- match(sel[i],col.pred)
+  col.pred[foo] <- env[i]
+}
+
+# set color for non-candidate snps
+# change if they don't already have a color
+col.pred[! col.pred %in% colset] <- '#f1eef6' # non-candidate SNPs
+empty <- col.pred
+empty[grep("#f1eef6",empty)] <- rgb(0,1,0, alpha=0) # transparent
+empty.outline <- ifelse(empty=="#00FF0000","#00FF0000","gray32")
+bg <- colset
+
+# now plot
+
+# axes 1 & 2
+png(file = 'results/redundancy_analysis/rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_onlyGuadalupe_PC1_PC2.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3)
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3)
+text(rda, scaling=3, display="bp", cex=1)
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+dev.off()
+
+# axes 1 & 3
+png(file = 'results/redundancy_analysis/rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_onlyGuadalupe_PC1_PC3.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1), choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3, choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3, choices=c(1,3))
+text(rda, scaling=3, display="bp", cex=1, choices=c(1,3))
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+dev.off()
+
+```
+
+
+
+```{r look_at_snps_only_guad}
+
+cand.sort <- cand[order(cand$correlation, decreasing = T),]
+
+
+# colors
+cols <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# plot just one
+# snp <- cand.sort$snp[1]
+# cli <- cand.sort$predictor[1]
+# plot(jitter(snps.sub[,snp], 0.3), clim.sub[,cli],
+#      main = snp,
+#      ylab = cli,
+#      xlab = 'genotype',
+#      bg = cols[info.sub$island],
+#      col = 'black',
+#      pch = 21,
+#      cex = 1)
+
+
+
+# plot more
+top <- min(96, nrow(cand.sort))
+
+#dev.new()
+par(mfrow = c(4,6))
+par(mar = c(3,4,2,1))
+
+for(n in 1:top){
+  
+  snp <- cand.sort$snp[n]
+  cli <- cand.sort$predictor[n]
+  plot(jitter(snps.sub[,snp], 0.3),
+       clim.sub[,cli],
+       main = snp,
+       ylab = cli,
+       xlab = 'genotype',
+       bg = cols[info.sub$island],
+       col = 'black',
+       pch = 21,
+       cex = 1)
+}
+
+
+# to save
+
+# set = 1
+# for(n in 1:top){
+#   
+#   # start a new plot every 24
+#   if(n %% 24 == 1){
+#     
+#     png(file = paste('RDA_SNP-climate_cors_onlyGuadalupe_set_', set, '.png', sep = ''),
+#         height = 10, width = 16,
+#         units = 'in',
+#         res = 300)
+#     
+#     par(mfrow = c(4,6))
+#     par(mar = c(3,4,2,1))
+#   }
+# 
+#   
+#   snp <- cand.sort$snp[n]
+#   cli <- cand.sort$predictor[n]
+#   plot(jitter(snps.sub[,snp], 0.3),
+#        clim.sub[,cli],
+#        main = snp,
+#        ylab = cli,
+#        xlab = 'genotype',
+#        bg = cols[info.sub$island],
+#        col = 'black',
+#        pch = 21,
+#        cex = 1)
+#   
+#   if(n %% 24 == 0){
+#     dev.off()
+#     set = set+1
+#   }
+#   
+# }
+
+```
+
+
+```{r save_candidate_SNPs_guadalupe}
+
+# write.table(cand.sort, 'results/RDA_candidate_climate_SNP_table_onlyGuadalupe.csv', row.names = F, quote = F)
+# save(cand.sort, file = 'results/RDA_candidate_climate_SNP_table_onlyGuadalupe.rda')
+
+```
+
+
+
+# GEA analysis without Guadalupe, Qchr, or Anacapa
+
+## RDA of SNPs and climate
+
+```{r rda_clim_no_guad_no_Qchr_no_ana}
+
+# some of the SNP-climate associations seemed to be strongly affected by Anacapa trees, which are very closely related and at the same site, so they have the same climate variables
+# version of RDA without Anacapa samples
+# this is what gets used in gradient forest script
+
+# here we'll use the subset climate variables to do a more detailed GEA
+
+# get subset without guadalupe or anacapa
+clim.sub <- clim[! info$island %in% c('Guadalupe Island', 'Mainland', 'Anacapa Island'),]
+snps.sub <- snps[! info$island %in% c('Guadalupe Island', 'Mainland', 'Anacapa Island'),]
+imp.sub <- imp[! info$island %in% c('Guadalupe Island', 'Mainland', 'Anacapa Island'),]
+info.sub <- info[! info$island %in% c('Guadalupe Island', 'Mainland', 'Anacapa Island'),]
+
+rda <- rda(imp.sub ~ ., data = as.data.frame(clim.sub[,vars]), scale = T)
+screeplot(rda)
+rda
+rda.info <- summary(rda)
+head(rda.info)
+RsquareAdj(rda)
+# $r.squared
+# [1] 0.09138727
+# $adj.r.squared
+# [1] 0.0294364
+
+# colors
+cols <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+plot_clim(rda, info = info.sub, save = F, file_string = 'Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupeAnacapa')
+plot_clim(rda, info = info.sub, choices = c(1,3), save = F, file_string = 'Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupeAnacapa')
+
+
+plot(rda, type = 'none')
+points(rda, display = 'sites', pch = sp[info.sub$sp], bg = bg[info.sub$island], col = 'black', cex = 1.5)
+text(rda, display = 'bp')
+points(rda, display = 'species', pch = 21, cex = 1, col = 'gray32')
+
+```
+
+
+
+## identify candidate SNPs from RDA outliers
+
+```{r GEA_no_guad_no_Qchr_no_ana}
+
+# again basically following Forester et al
+
+# most variation explained by first three axes (~5% out of 9% unadjusted)
+screeplot(rda)
+summary(rda)$cont
+
+# get SNP loadings for first 3 axes
+load.rda <- scores(rda, choices=c(1:3), display="species")
+
+hist(load.rda[,1], main="Loadings on RDA1")
+hist(load.rda[,2], main="Loadings on RDA2")
+hist(load.rda[,3], main="Loadings on RDA3") 
+
+outliers <- function(x,z){
+  
+  lims <- mean(x) + c(-1, 1) * z * sd(x) # find loadings +/-z sd from mean loading  
+  x[x < lims[1] | x > lims[2]] # locus names in these tails
+  
+}
+
+# start out with a cutoff of 4 std dev because there are a lot of snps
+cand1 <- outliers(load.rda[,1],4)
+cand2 <- outliers(load.rda[,2],4)
+cand3 <- outliers(load.rda[,3],4)
+
+length(cand1)
+length(cand2)
+length(cand3)
+
+ncand <- length(cand1) + length(cand2) + length(cand3)
+ncand
+
+
+# set up results
+
+cand1 <- cbind.data.frame(rep(1,times=length(cand1)), names(cand1), unname(cand1))
+cand2 <- cbind.data.frame(rep(2,times=length(cand2)), names(cand2), unname(cand2))
+cand3 <- cbind.data.frame(rep(3,times=length(cand3)), names(cand3), unname(cand3))
+
+colnames(cand1) <- colnames(cand2) <- colnames(cand3) <- c("axis","snp","loading")
+
+cand <- rbind(cand1, cand2, cand3)
+cand$snp <- as.character(cand$snp)
+
+# get correlations of SNPs with climate
+tmp <- matrix(nrow=(ncand), ncol=ncol(clim.sub[,vars]))
+
+colnames(tmp) <- colnames(clim.sub[,vars])
+
+for (i in 1:length(cand$snp)) {
+  
+  nam <- cand$snp[i] # loop through candidate snp names
+  snp.gen <- imp.sub[,nam]
+  tmp[i,] <- apply(clim.sub[,vars], 2, function(x) cor(x,snp.gen))
+}
+
+cand <- cbind.data.frame(cand, tmp)
+head(cand)
+
+
+#  check for duplicate snps - outliers on multiple axes
+length(cand$snp[duplicated(cand$snp)]) # 0 - so skip below
+
+# foo <- cbind(cand$axis, duplicated(cand$snp)) 
+# table(foo[foo[,1]==1,2]) # no duplicates on axis 1
+# table(foo[foo[,1]==2,2]) #  6 duplicates on axis 2
+# table(foo[foo[,1]==3,2]) # no duplicates on axis 3
+# 
+# cand <- cand[!duplicated(cand$snp),] # remove duplicate detections
+
+dim(cand) # 560 SNPs
+
+# get best climate correlation for each snp
+# note: need to modify the columns if different climate variables are used
+
+for (i in 1:length(cand$snp)) {
+  
+  row <- cand[i,]
+  cand[i, 10] <- names(which.max(abs(row[vars]))) # gives the variable
+  cand[i, 11] <- max(abs(row[vars]))              # gives the correlation
+}
+
+colnames(cand)[10] <- "predictor"
+colnames(cand)[11] <- "correlation"
+
+table(cand$predictor)
+# bio15 bio18 bio19  bio5  bio6  elev 
+#    47    73   174    88    23   155
+
+########
+# plot!
+
+# colors
+sel <- cand$snp
+env <- cand$predictor
+
+colset <- c("#d64b15","#013479","#ffb90f","#22a27c","#b1e3ad","#7d9ceb")
+env[env=="bio5"] <- colset[1] # Max Temperature of Warmest Month
+env[env=="bio6"] <- colset[2] # Min Temperature of Coldest Month
+env[env=="bio15"] <- colset[3] # Precipitation Seasonality (Coefficient of Variation)
+env[env=="bio18"] <- colset[4] # Precipitation of Warmest Quarter
+env[env=="bio19"] <- colset[5] # Precipitation of Coldest Quarter
+env[env=="elev"] <- colset[6]
+
+# color by predictor:
+col.pred <- rownames(rda$CCA$v) # pull the SNP names
+
+for (i in 1:length(sel)) {           # color code candidate SNPs
+  foo <- match(sel[i],col.pred)
+  col.pred[foo] <- env[i]
+}
+
+# set color for non-candidate snps
+# change if they don't already have a color
+col.pred[! col.pred %in% colset] <- '#f1eef6' # non-candidate SNPs
+empty <- col.pred
+empty[grep("#f1eef6",empty)] <- rgb(0,1,0, alpha=0) # transparent
+empty.outline <- ifelse(empty=="#00FF0000","#00FF0000","gray32")
+bg <- colset
+
+# now plot
+
+# axes 1 & 2
+#png(file = 'rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupeAnacapa_PC1_PC2.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3)
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3)
+text(rda, scaling=3, display="bp", cex=1)
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+#dev.off()
+
+# axes 1 & 3
+#png(file = 'rda_plot_SNPs_clim_Qtom107.Qchr17.Qssp3_GEA_noQchrGuadalupeAnacapa_PC1_PC3.png', width = 10, height = 9, res = 300, units = 'in')
+plot(rda, type="n", scaling=3, xlim=c(-1,1), ylim=c(-1,1), choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col="gray32", bg=col.pred, scaling=3, choices=c(1,3))
+points(rda, display="species", pch=21, cex=1, col=empty.outline, bg=empty, scaling=3, choices=c(1,3))
+text(rda, scaling=3, display="bp", cex=1, choices=c(1,3))
+legend("bottomright", legend=vars, bty="n", col="gray32", pch=21, cex=1.2, pt.bg=bg)
+#dev.off()
+
+
+# save
+
+# write.table(cand, 'results/RDA_candidate_climate_SNP_table_noGuadAna.csv', row.names = F, quote = F)
+# save(cand, file = 'results/RDA_candidate_climate_SNP_table_noGuadAna.rda')
+
+```
+
+```{r compare_results, eval = F, include = F}
+
+# look at how different the results are with vs without Anacapa included
+
+cand.with <- read.table('results/redundancy_analysis/RDA_candidate_climate_SNP_table.csv', header = T)
+cand.wo <- read.table('results/redundancy_analysis/RDA_candidate_climate_SNP_table_noGuadAna.csv', header = T)
+cand.all <- read.table('results/redundancy_analysis/RDA_candidate_climate_SNP_table_noQchr.csv', header = T)
+
+snp.with <- cand.with$snp
+snp.wo <- cand.wo$snp
+snp.all <- cand.all$snp
+
+# proportion of with-Anacapa set included in without-Anacapa set
+sum(snp.with %in% snp.wo) #217 genes
+sum(snp.with %in% snp.wo)/length(snp.with) # 14.7%
+
+# proportion of without-Anacapa set included in with-Anacapa set
+sum(snp.wo %in% snp.with) #217 genes
+sum(snp.wo %in% snp.with)/length(snp.wo) # 38.8%
+
+# proportion of without-anacapa set included in all
+sum(snp.wo %in% snp.all) #176
+sum(snp.wo %in% snp.all)/length(snp.wo) # 31.4%
+
+# proportion of all set included in without-anacapa set
+sum(snp.all %in% snp.wo) # 176
+sum(snp.all %in% snp.wo)/length(snp.all) # 13.0%
+
+# so removing Anacapa samples removed a lot of the candidate SNPs previously included
+# but lots of the snps in the second set were also included in the first (tho not most)
+
+# venn diagram:
+library(ggvenn)
+ggvenn(list(all=snp.all, noGuad=snp.with, noGuadAna=snp.wo))
+ggvenn(list(all=snp.all, noGuad=snp.with), auto_scale = T)
+ggvenn(list(all=snp.all, noGuadAna=snp.wo), auto_scale = T)
+ggvenn(list(noGuad=snp.with, noGuadAna=snp.wo), auto_scale = T)
+
+# number of SNPs from noGuadAna (most conservative subset) included in all
+176/(176+384) # 0.3875
+
+```
+
+```{r look_at_snps_no_guad_no_Qchr_no_ana}
+
+cand.sort <- cand[order(cand$correlation, decreasing = T),]
+
+
+# colors
+cols <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# plot just one
+# snp <- cand.sort$snp[1]
+# cli <- cand.sort$predictor[1]
+# plot(jitter(snps.sub[,snp], 0.3), clim.sub[,cli],
+#      main = snp,
+#      ylab = cli,
+#      xlab = 'genotype',
+#      bg = cols[info.sub$island],
+#      col = 'black',
+#      pch = 21,
+#      cex = 1)
+
+
+
+# plot more
+top <- min(96, nrow(cand.sort))
+
+#dev.new()
+par(mfrow = c(4,6))
+par(mar = c(3,4,2,1))
+
+for(n in 1:top){
+  
+  snp <- cand.sort$snp[n]
+  cli <- cand.sort$predictor[n]
+  plot(jitter(snps.sub[,snp], 0.3),
+       clim.sub[,cli],
+       main = snp,
+       ylab = cli,
+       xlab = 'genotype',
+       bg = cols[info.sub$island],
+       col = 'black',
+       pch = 21,
+       cex = 1.2)
+}
+
+
+# to save
+
+# set = 1
+# for(n in 1:top){
+#   
+#   # start a new plot every 24
+#   if(n %% 24 == 1){
+#     
+#     png(file = paste('RDA_SNP-climate_cors_set_noGuadAna', set, '.png', sep = ''),
+#         height = 10, width = 16,
+#         units = 'in',
+#         res = 300)
+#     
+#     par(mfrow = c(4,6))
+#     par(mar = c(3,4,2,1))
+#   }
+# 
+#   
+#   snp <- cand.sort$snp[n]
+#   cli <- cand.sort$predictor[n]
+#   plot(jitter(snps.sub[,snp], 0.3),
+#        clim.sub[,cli],
+#        main = snp,
+#        ylab = cli,
+#        xlab = 'genotype',
+#        bg = cols[info.sub$island],
+#        col = 'black',
+#        pch = 21,
+#        cex = 1)
+#   
+#   if(n %% 24 == 0){
+#     dev.off()
+#     set = set+1
+#   }
+#   
+# }
+
+
+```
+
+

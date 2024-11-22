@@ -1,0 +1,391 @@
+---
+title: "Plot Fst"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+Plot Fst results output from fast-wcfst
+
+# Fst by island
+
+```{r setup}
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+fst <- read.csv('/home/alayna/Documents/research/projects/2022_island_oak/results/popgen_stats/fast-wcfst_output_island.tsv', sep = '\t')
+str(fst)
+
+sessionInfo()
+
+
+```
+
+
+```{r get_data}
+
+# get list of islands from fst file
+isl <- unique(c(fst$Population.A, fst$Population.B))
+
+# reorder
+dput(isl)
+
+isl <- c( "Mainland", "Santa Rosa Island", "Santa Cruz Island", "Anacapa Island", "Catalina Island", "San Clemente Island", "Guadalupe Island")
+
+
+fst.df <- as.data.frame(matrix(nrow = length(isl), ncol = length(isl)))
+colnames(fst.df) <- isl
+rownames(fst.df) <- isl
+
+pairs <- combn(isl, 2)
+
+
+for(n in 1:nrow(fst)){
+  
+  pop1 <- fst$Population.A[n]
+  pop2 <- fst$Population.B[n]
+  
+  # add Fst to both sides of diagonal
+  fst.df[pop1, pop2] <- fst$Mean.Fst[n]
+  fst.df[pop2, pop1] <- fst$Mean.Fst[n]
+  
+}
+
+# make version with rounded values for nicer display
+fst.df.round <- round(fst.df, 3)
+
+#############################
+# get weighted value 
+fst.weight <- as.data.frame(matrix(nrow = length(isl), ncol = length(isl)))
+colnames(fst.weight) <- isl
+rownames(fst.weight) <- isl
+
+for(n in 1:nrow(fst)){
+  
+  pop1 <- fst$Population.A[n]
+  pop2 <- fst$Population.B[n]
+  
+  # add Fst to both sides of diagonal
+  fst.weight[pop1, pop2] <- fst$Weighted.Fst[n]
+  fst.weight[pop2, pop1] <- fst$Weighted.Fst[n]
+  
+}
+
+# make version with rounded values for nicer display
+fst.weight.round <- round(fst.weight, 3)
+
+
+#################################
+# variance
+
+fst.var <- as.data.frame(matrix(nrow = length(isl), ncol = length(isl)))
+colnames(fst.var) <- isl
+rownames(fst.var) <- isl
+
+for(n in 1:nrow(fst)){
+  
+  pop1 <- fst$Population.A[n]
+  pop2 <- fst$Population.B[n]
+  
+  # add Fst to both sides of diagonal
+  fst.var[pop1, pop2] <- fst$Mean.Variance[n]
+  fst.var[pop2, pop1] <- fst$Mean.Variance[n]
+  
+}
+
+# make version with rounded values for nicer display
+fst.var.round <- round(fst.var, 3)
+
+
+
+########
+# make new dataframe including fst and the upper and lower limits
+
+# calculate upper and lower
+fst.low <- fst.df - sqrt(fst.var)
+fst.low.round <- round(fst.low, 3)
+
+fst.high <- fst.df + sqrt(fst.var)
+fst.high.round <- round(fst.high, 3)
+
+fst.text <- fst.df
+
+pairs <- combn(colnames(fst.df), 2)
+for(n in 1:ncol(pairs)){
+  
+  pop1 <- pairs[1,n]
+  pop2 <- pairs[2,n]
+  
+  text <- paste(fst.df.round[pop1,pop2], ' (', fst.low.round[pop1, pop2], ', ', fst.high.round[pop1, pop2], ')', sep = '')
+  
+  fst.text[pop1, pop2] <- text
+  fst.text[pop2, pop1] <- text
+  
+}
+
+fst.text
+
+# add column for average
+fst.text$average <- rowMeans(fst.df, na.rm = T)
+# exclude mainland
+fst.text$average_islands <- c(NA, rowMeans(fst.df[rownames(fst.df)!= 'Mainland',colnames(fst.df)!= 'Mainland'], na.rm = T))
+fst.text$average <- round(fst.text$average, 3)
+fst.text$average_islands <- round(fst.text$average_islands, 3)
+
+fst.text
+
+#write.csv(fst.text, file = 'results/popgen_stats/Fst_island_table.csv')
+
+
+```
+
+```{r plot_by_island, fig.width=8, fig.height=8}
+
+# heatmap
+
+# make version with rounded values for nicer display
+fst.df.round <- round(fst.df, 3)
+
+#png(file = 'results/popgen_stats/Fst_heatmap_fast-wcfst.png', width = 8, height = 8, res = 300, units = 'in')
+par(mar = c(5,4,4,10))
+Heatmap(as.matrix(fst.df),
+        cluster_rows = F, cluster_columns = F,
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_gp = gpar(fontsize = 14),
+        row_names_gp = gpar(fontsize = 14),
+        column_names_rot = 90,
+        col = brewer.pal(9, 'YlOrRd'),
+        show_heatmap_legend = F,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(fst.df.round[i,j], x, y, gp = gpar(fontsize = 14))
+        })
+#dev.off()
+
+# weighted
+
+#png(file = 'results/popgen_stats/Fst_weighted_heatmap_fast-wcfst.png', width = 8, height = 8, res = 300, units = 'in')
+par(mar = c(5,4,4,10))
+Heatmap(as.matrix(fst.weight),
+        cluster_rows = F, cluster_columns = F,
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_gp = gpar(fontsize = 14),
+        row_names_gp = gpar(fontsize = 14),
+        column_names_rot = 90,
+        col = brewer.pal(9, 'YlOrRd'),
+        show_heatmap_legend = F,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(fst.weight.round[i,j], x, y, gp = gpar(fontsize = 14))
+        })
+#dev.off()
+
+
+# variance
+
+#png(file = 'results/popgen_stats/Fst_variance_heatmap_fast-wcfst.png', width = 8, height = 8, res = 300, units = 'in')
+par(mar = c(5,4,4,10))
+Heatmap(as.matrix(fst.var),
+        cluster_rows = F, cluster_columns = F,
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_gp = gpar(fontsize = 14),
+        row_names_gp = gpar(fontsize = 14),
+        column_names_rot = 90,
+        col = brewer.pal(9, 'YlOrRd'),
+        show_heatmap_legend = F,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(fst.var.round[i,j], x, y, gp = gpar(fontsize = 14))
+        })
+#dev.off()
+
+```
+
+# Fst by island and ancestry
+
+```{r load_ancestry}
+
+rm(fst)
+
+fst <- read.csv('/home/alayna/Documents/research/projects/2022_island_oak/results/popgen_stats/fast-wcfst_output_ancestry.tsv', sep = '\t')
+str(fst)
+
+```
+
+```{r get_data_ancesty}
+
+# get list of islands from fst file
+isl <- unique(c(fst$Population.A, fst$Population.B))
+
+# reorder
+dput(isl)
+
+isl <- c( "Mainland", "Santa Rosa Island", "Santa Cruz Island", "Anacapa Island", "Catalina Island", "San Clemente Island", "Guadalupe Island")
+
+isl <- c("Mainland_Qchr", "Santa Rosa Island_Qtom", "Santa Cruz Island_Qtom", "Santa Cruz Island_hybrid", "Anacapa Island_Qtom", "Catalina Island_hybrid", "Catalina Island_Qchr", "San Clemente Island_hybrid","San Clemente Island_Qchr", "Guadalupe Island_Guadalupe", "Guadalupe Island_hybrid")
+
+
+fst.df <- as.data.frame(matrix(nrow = length(isl), ncol = length(isl)))
+colnames(fst.df) <- isl
+rownames(fst.df) <- isl
+
+for(n in 1:nrow(fst)){
+  
+  pop1 <- fst$Population.A[n]
+  pop2 <- fst$Population.B[n]
+  
+  # add Fst to both sides of diagonal
+  fst.df[pop1, pop2] <- fst$Mean.Fst[n]
+  fst.df[pop2, pop1] <- fst$Mean.Fst[n]
+  
+}
+
+# make version with rounded values for nicer display
+fst.df.round <- round(fst.df, 3)
+
+#############################
+# get weighted value 
+fst.weight <- as.data.frame(matrix(nrow = length(isl), ncol = length(isl)))
+colnames(fst.weight) <- isl
+rownames(fst.weight) <- isl
+
+for(n in 1:nrow(fst)){
+  
+  pop1 <- fst$Population.A[n]
+  pop2 <- fst$Population.B[n]
+  
+  # add Fst to both sides of diagonal
+  fst.weight[pop1, pop2] <- fst$Weighted.Fst[n]
+  fst.weight[pop2, pop1] <- fst$Weighted.Fst[n]
+  
+}
+
+# make version with rounded values for nicer display
+fst.weight.round <- round(fst.weight, 3)
+
+
+#################################
+# variance
+
+fst.var <- as.data.frame(matrix(nrow = length(isl), ncol = length(isl)))
+colnames(fst.var) <- isl
+rownames(fst.var) <- isl
+
+for(n in 1:nrow(fst)){
+  
+  pop1 <- fst$Population.A[n]
+  pop2 <- fst$Population.B[n]
+  
+  # add Fst to both sides of diagonal
+  fst.var[pop1, pop2] <- fst$Mean.Variance[n]
+  fst.var[pop2, pop1] <- fst$Mean.Variance[n]
+  
+}
+
+# make version with rounded values for nicer display
+fst.var.round <- round(fst.var, 3)
+
+
+
+########
+# make new dataframe including fst and the upper and lower limits
+
+# calculate upper and lower
+fst.low <- fst.df - sqrt(fst.var)
+fst.low.round <- round(fst.low, 3)
+
+fst.high <- fst.df + sqrt(fst.var)
+fst.high.round <- round(fst.high, 3)
+
+fst.text <- fst.df
+
+pairs <- combn(colnames(fst.df), 2)
+for(n in 1:ncol(pairs)){
+  
+  pop1 <- pairs[1,n]
+  pop2 <- pairs[2,n]
+  
+  text <- paste(fst.df.round[pop1,pop2], ' (', fst.low.round[pop1, pop2], ', ', fst.high.round[pop1, pop2], ')', sep = '')
+  
+  fst.text[pop1, pop2] <- text
+  fst.text[pop2, pop1] <- text
+  
+}
+
+fst.text
+
+# add column for average
+fst.text$average <- rowMeans(fst.df, na.rm = T)
+# exclude mainland
+fst.text$average_islands <- c(NA, rowMeans(fst.df[rownames(fst.df)!= 'Mainland_Qchr',colnames(fst.df)!= 'Mainland_Qchr'], na.rm = T))
+fst.text$average <- round(fst.text$average, 3)
+fst.text$average_islands <- round(fst.text$average_islands, 3)
+
+fst.text
+
+#write.csv(fst.text, file = 'results/popgen_stats/Fst_island_ancestry_table.csv')
+
+
+```
+
+```{r plot_by_ancestry, fig.width=10, fig.height=10}
+
+# heatmap
+
+#png(file = 'results/popgen_stats/Fst_heatmap_fast-wcfst_ancestry.png', width = 10, height = 10, res = 300, units = 'in')
+par(mar = c(5,4,4,10))
+Heatmap(as.matrix(fst.df),
+        cluster_rows = F, cluster_columns = F,
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_gp = gpar(fontsize = 14),
+        row_names_gp = gpar(fontsize = 14),
+        column_names_rot = 90,
+        col = brewer.pal(9, 'YlOrRd'),
+        show_heatmap_legend = F,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(fst.df.round[i,j], x, y, gp = gpar(fontsize = 14))
+        })
+#dev.off()
+
+# weighted
+
+#png(file = 'results/popgen_stats/Fst_weighted_heatmap_fast-wcfst_ancestry.png', width = 10, height = 10, res = 300, units = 'in')
+par(mar = c(5,4,4,10))
+Heatmap(as.matrix(fst.weight),
+        cluster_rows = F, cluster_columns = F,
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_gp = gpar(fontsize = 14),
+        row_names_gp = gpar(fontsize = 14),
+        column_names_rot = 90,
+        col = brewer.pal(9, 'YlOrRd'),
+        show_heatmap_legend = F,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(fst.weight.round[i,j], x, y, gp = gpar(fontsize = 14))
+        })
+#dev.off()
+
+
+# variance
+
+#png(file = 'results/popgen_stats/Fst_variance_heatmap_fast-wcfst_ancestry.png', width = 10, height = 10, res = 300, units = 'in')
+par(mar = c(5,4,4,10))
+Heatmap(as.matrix(fst.var),
+        cluster_rows = F, cluster_columns = F,
+        row_names_side = 'left',
+        column_names_side = 'top',
+        column_names_gp = gpar(fontsize = 14),
+        row_names_gp = gpar(fontsize = 14),
+        column_names_rot = 90,
+        col = brewer.pal(9, 'YlOrRd'),
+        show_heatmap_legend = F,
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          grid.text(fst.var.round[i,j], x, y, gp = gpar(fontsize = 14))
+        })
+#dev.off()
+
+```

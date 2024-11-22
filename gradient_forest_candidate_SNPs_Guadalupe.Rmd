@@ -1,0 +1,1956 @@
+---
+title: "Gradient Forest - Candidate SNPs"
+author: "Alayna Mead"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+---
+
+# Setup
+
+## Libraries
+
+```{r setup_libs}
+
+library(gradientForest)
+library(psych) # for pairs.panels()
+library(vegan) # for pcnm()
+library(RColorBrewer) # colors
+library(sf) # spatial functions
+library(terra) # spatial functions
+
+sessionInfo()
+
+```
+
+```{r markdown_settings, include = F}
+
+knitr::opts_chunk$set(fig.width = 12, fig.height = 10)
+
+```
+
+
+## Input and setup data
+
+`clim` is a large dataframe with all climate variables (bioclim, basin characterization model, future projections) for each sample collected
+
+`snps` is a genlight object produced by adegenet by reading in a PLINK file. Contains filtered, LD-pruned, biallelic SNPs. - can delete since we're using the imputed snps?
+
+`snps` is a dataframe of imputed SNPs (rows are samples, columns are SNPs, values are 0, 1, or 2 for the number of copies of the variant). SNPs are filtered, LD-pruned, and biallelic, missing data was imputed in RDA script because gradient forest doesn't allow NAs.
+
+`snps.cand` is the imputed snps subset to candidate SNPs produced from the RDA.
+```{r setup_load_data}
+
+# climate data
+load('data/clean/climate_locality_data_BCM_and_bioclim.rda')
+clim <- as.data.frame(clim.all)
+rm(clim.all)
+str(clim)
+
+# imputed SNPs
+# file made in RDA script
+# named 'imp', rename to 'snps'
+load('data/clean/Qtom107.Qchr17.Qssp3.20220906.qlob.ef.repeatsOut.renamedChrsVars.biallelicSNPs.meanDP5.genoDP5.MAF0.01.missing0.9.ldPruned.additive_imputed.rda')
+snps <- imp
+rm(imp)
+
+
+# get candidate SNPs from RDA
+# named 'cand' or 'cand.sort'
+
+
+# version for Guadalupe candidate SNPs
+load('results/redundancy_analysis/RDA_candidate_climate_SNP_table_onlyGuadalupe.rda')
+rownames(cand.sort) <- cand.sort$snp
+str(cand.sort)
+cand <- cand.sort
+
+
+
+```
+
+
+
+```{r clean_data}
+
+snps <-  as.matrix(snps)
+snps[1:10, 1:10]
+
+
+# first get rid of the individuals without coord data
+snps <- snps[rownames(snps) %in% clim$ID_vcf,]
+
+# now get rid of the individuals without SNP data
+# also reorder to match snp order
+clim <- clim[match(rownames(snps), clim$ID_vcf),]
+
+
+# check that rows are in same order
+cbind(rownames(clim), rownames(snps))
+sum(rownames(clim) != rownames(snps))
+
+# rename SNP rownames to the same as clim rownames
+rownames(snps) <- rownames(clim[clim$ID_vcf == rownames(snps),])
+
+# subset imputed snps to just the candidate SNPs
+snps.cand <- snps[, colnames(snps) %in% cand$snp]
+dim(snps.cand) # [1]   93 560
+# rename columns - gf complains about it starting with a number
+colnames(snps.cand) <- make.names(colnames(snps.cand))
+
+# check again
+cbind(rownames(clim), rownames(snps))
+sum(rownames(clim) != rownames(snps))
+
+
+```
+
+```{r subset_islands}
+
+# remove Mainland Qchr samples
+
+keep <- clim$island %in% c("Santa Rosa Island", "Santa Cruz Island", "Anacapa Island", "Catalina Island", "San Clemente Island", "Guadalupe Island")
+clim <- clim[keep,]
+snps <- snps[keep,]
+snps.cand <- snps.cand[keep,]
+
+# check that rows are in same order
+cbind(rownames(clim), rownames(snps))
+sum(rownames(clim) != rownames(snps))
+cbind(rownames(snps.cand), rownames(snps))
+sum(rownames(snps.cand) != rownames(snps))
+
+```
+
+Here  `clim` gets subset to variables of interest
+
+```{r subset_climate}
+
+# use bioclim vars, which have better coverage of San Clemente
+bclim <- clim[,c("bio1", "bio2", "bio3", "bio4", "bio5", "bio6", "bio7", "bio8", "bio9", "bio10", "bio11", "bio12", "bio13", "bio14", "bio15", "bio16", "bio17", "bio18", "bio19", "elev")]
+
+# using the same variables used in the RDA
+vars <- c('bio5', 'bio6', 'bio15', 'bio18', 'bio19', 'elev')
+
+heatmap(abs(cor(bclim[,vars])), scale = 'none')
+pairs.panels(bclim[,vars], scale = T)
+
+bclim <- bclim[,vars]
+
+```
+
+```{r dist_setup}
+
+# Other papers' methods are a bit unclear about whether they used distances or the actual lat/lon values. But the function requires a distance matrix.
+
+# load distance matrix, named 'dist_df', rename to 'dist'
+# made in 'calculate_distance_matrix.Rmd'
+load('data/clean/geo_distance_matrix.rda')
+dist <- dist_df
+rm(dist_df)
+heatmap(as.matrix(dist), Rowv = NA, Colv = NA, scale = 'none')
+
+# subset to include only the individuals being used here
+dist <- dist[rownames(dist) %in% clim$ID_vcf, colnames(dist) %in% clim$ID_vcf]
+dist <- dist[clim$ID_vcf, clim$ID_vcf]
+
+heatmap(as.matrix(dist), Rowv = NA, Colv = NA, scale = 'none')
+
+# check order
+cbind(rownames(dist), clim$ID_vcf)
+sum(rownames(dist) != clim$ID_vcf)
+# rename to match
+rownames(dist) <- rownames(clim)
+sum(rownames(dist) != rownames(clim))
+
+heatmap(as.matrix(dist), Rowv = NA, Colv = NA, scale = 'none')
+
+# convert to km
+dist <- dist/1000
+
+```
+
+## Calculate MEM variables
+
+```{r calculate_MEM}
+
+# calculate MEM/PCMN variables (used as measures of distance in gradient forest)
+
+# test pcnm with default params
+mem <- pcnm(dist)
+mem
+
+# visualize
+
+palette(c('black', "#3c4a8b", "#009c85", "#84bc5f", "#edb829", "#f57404","#b30000"))
+
+ordisplom(mem, col = clim$island)
+
+par(mfrow = c(2,4))
+for(n in 1:ncol(mem$vectors)){
+  
+  plot(mem$vectors[,n], col = clim$island)
+  
+}
+
+# Testing different threshold values
+# see ?pcnm
+# "The selection of truncation distance has a huge influence on the PCNM vectors. The default is to use the longest distance to keep data connected. The distances above truncation threshold are given an arbitrary value of 4 times threshold. For regular data, the first PCNM vectors show a wide scale variation and later PCNM vectors show smaller scale variation (Borcard & Legendre 2002), but for irregular data the interpretation is not as clear."
+# this is pretty irregular/clustered data
+
+# look at mem 2
+# which separates out 2 individuals: one from Clemente and one from Guadalupe
+# these two are the closest of the northern/southern island pairs, so this distance is used as the truncation distance, and they cluster together along MEM2. This doesn't really make sense biologically, so let's test other threshold values
+mem$vectors[order(mem$vectors[,2]), ]
+dist['Qchr.I.LA.25', 'Qtom.I.BC.4']
+
+# default threshold value
+mem$threshold # 411.5544 km
+max(dist) # 569.4181
+
+# distance between samples is pretty bimodal since they are clustered within islands, then between Guadalupe/California, then within northern/southern islands
+par(mfrow = c(1,1))
+hist(as.matrix(dist), breaks = 'fd')
+abline(v = mem$threshold) # threshold near low end of the northern/southern break
+
+# try increasing the threshold values (by km)
+thresh <- c(410, 420, 425, 430, 450, 500) # thresholds to test
+
+for(n in 1:length(thresh)){
+  
+  mtest <- pcnm(dist, threshold = thresh[n])
+  
+  # plot
+  par(mfrow = c(2,4))
+  for(v in 1:ncol(mtest$vectors)){
+    
+    plot(mtest$vectors[,v], col = clim$island,
+         main = mtest$threshold)
+    
+  }
+
+  
+}
+
+# 430 seems reasonable - axis 1 separates out Guadalupe, then Clemente, then others
+# axis 2 and 3 are more fine-scale
+
+# final version - calculate MEM
+
+mem <- pcnm(dist, threshold = 430)
+
+
+# add these to the climate dataframe
+# only use the first half of the positive eigenvectors, following previous studies (eg Fitzpatrick & Keller 2014, Gugger et al 2017 koa paper)
+pos_mem <- mem$values[mem$values>0] # the positive values
+# keep half (round up if it's an odd number)
+n_mem <- ceiling(length(pos_mem)/2)
+
+# save both mem and climate variables to gradient forest input object
+gfin <- cbind(bclim, mem$vectors[,1:n_mem])
+colnames(gfin)
+str(gfin)
+
+
+```
+
+```{r save_input_files}
+
+#save(gfin, snps, clim, file = 'gradient_forest_input_candidate_Guadalupe.rda')
+
+# remove intermediate files
+rm(snps, mtest)
+
+```
+
+# Run Gradient Forest
+
+Input files:
+
+`gfin` is a dataframe with the climate and PCNM/MEM variables as columns and samples as rows.
+
+`snps.cand` are the candidate SNPs
+
+```{r run_gf_candidate_SNPs, warning = F}
+
+# most of this code is modified from Fitzpatrick and Keller 2015, available on Dryad:
+# https://datadryad.org/stash/dataset/doi:10.5061/dryad.2s6f9
+ 
+
+maxLevel <- log2(0.368*nrow(gfin)/2) #account for correlations, see ?gradientForest 
+
+# run gradient forest !
+
+# gives warning
+# "The response has five or fewer unique values.  Are you sure you want to do regression?"
+# because values are just 0/1/2, not population-level allele freqs
+
+gf.cand <- gradientForest(cbind(gfin, snps.cand), 
+                     predictor.vars=colnames(gfin),
+                     response.vars=colnames(snps.cand), 
+                     ntree=500,
+                     trace=T, 
+                     corr.threshold=0.50,
+                     maxLevel = maxLevel)
+
+gf.cand
+# Important variables:
+# [1] bio5  bio19 elev  PCNM1 PCNM3
+
+#png(file = '/home/alayna/Documents/research/projects/2022_island_oak/results/gradient_forest/gradient_forest_importance_candidate_candGuadalupe.png', height = 5, width = 7, res = 300, units = 'in')
+plot(gf.cand, plot.type='O')
+#dev.off()
+
+plot(gf.cand, plot.type = 'S')
+plot(gf.cand, plot.type = 'C')
+plot(gf.cand, plot.type = 'C', show.species = F)
+plot(gf.cand, plot.type = 'P')
+
+# plot cumulative importance for all variables
+
+#png(file = 'gradient_forest_cumulative_importance_Guadalupe_candidate_SNPs.png', height = 9, width = 12, units = 'in', res = 300)
+par(mfrow = c(3,4))
+for(n in 1:ncol(gfin)){
+  
+  pvar <- colnames(gfin)[n]
+  plot(cumimp(gf.cand, pvar),
+       type = 'l',
+       xlab = pvar,
+       ylab = 'cumulative importance',
+       main = pvar,
+       ylim = c(0, 0.1))
+  
+  # add points to show density of actual values
+  points(gfin[,n], rep(0, nrow(gfin)), pch = 16, col = rgb(0,0,0,0.2))
+  
+}
+#dev.off()
+
+# save
+#save(gf.cand, file = 'data/clean/gradient_forest_results_candidate_SNPs_Guadalupe.rda')
+
+
+```
+
+# Setup for mapping
+
+## Load climate rasters
+
+These are used to predict genomic composition at a given climate, based on gf model
+
+```{r get_clim_rasters}
+
+
+# first load one raster to get CRS info
+bio1 <- rast('climate/bioclim/worldclim_2.1_30sec/wc2.1_30s_bio_1.tif')
+
+# crop raster
+
+# see example in crop()
+# note: the bioclim raster still has to be mounted even though it's loaded into R
+# get extent - includes california islands + Guadalupe
+ext.ca <- ext(c(-121,-117.5,28.5,35))
+bio1 <- crop(bio1, ext.ca)
+
+plot(bio1)
+
+# now make extent objects to crop out mainland and get only values for the islands
+
+# northern
+isl.n <- ext(c(-120.3, -119.3, 33.8, 34.1))
+bio1.n <- crop(bio1, isl.n)
+plot(bio1.n)
+# southern
+isl.s <- ext(c(-118.7, -118.1, 32.7, 33.5))
+bio1.s <- crop(bio1, isl.s)
+plot(bio1.s)
+# Guadalupe
+isl.g <- ext(c(-118.4, -118.1, 28.8, 29.3))
+bio1.g <- crop(bio1, isl.g)
+plot(bio1.g)
+
+
+# combine all islands
+bio1 <- merge(bio1.n, bio1.s, bio1.g)
+plot(bio1)
+
+# bio1 is a SpatRaster object that only includes the California islands
+
+# now get all the clim rasters used in the gf model
+
+dput(vars)
+# files include underscore, add by hand
+vars_file <- c("bio_5", "bio_6", "bio_15", "bio_18", "bio_19", "elev")
+
+cells_list <- list()
+
+for(n in 1:length(vars_file)){
+  
+  ra <- rast(paste('climate/bioclim/worldclim_2.1_30sec/wc2.1_30s_', vars_file[n], '.tif', sep = ''))
+  
+  # crop to northern and southern islands, then re-combine them
+  # northern
+  ra.n <- crop(ra, isl.n)
+  #plot(ra.n)
+  # southern
+  ra.s <- crop(ra, isl.s)
+  #plot(ra.s)
+  ra.g <- crop(ra, isl.g)
+   
+  ra <- merge(ra.n, ra.s, ra.g)
+  
+  plot(ra, main = vars_file[n])
+  
+  # extract values for islands from raster
+  df <- extract(ra, ext(ra), cells = T, xy = F)
+  colnames(df)[2] <- vars[n]
+  
+  cells_list[[n]] <- df
+  
+}
+
+#extract another copy, this time with the lat/lon of the center of the cell
+cells_with_xy <- terra::extract(ra, ext(ra), cells = T, xy = T)
+
+# check that they all have the same number of cells
+lapply(cells_list, dim)
+# 167904      2
+
+# combine the extracted climate values into a dataframe
+# first two
+cells <- merge(cells_list[[1]], cells_list[[2]], by = 'cell')
+# then loop through rest
+
+for(n in 3:length(cells_list)){
+  
+  cells <- merge(cells, cells_list[[n]], by = 'cell')
+  
+}
+
+# add xy values
+cells$x <- cells_with_xy$x
+cells$y <- cells_with_xy$y
+
+# look at correlations
+plot(cells)
+
+# cell numbers we want to use
+cellNums <- cells$cell[complete.cases(cells)]
+
+head(cells[cellNums,])
+
+# set up empty raster, for saving turnover results to
+
+# using the most recently read raster from the loop above as a template
+# values are the cell numbers with values = T
+#rast_blank <- rasterFromCells(ra, cellNums, values = T)
+rast_blank <- rast(ra, vals = NA)
+
+# sum(values(rast) %in% cellNums)
+# rast[values(rast) %in% cellNums]
+# cellIndex <- which(values(rast) %in% cellNums)
+# 
+# # now set values to NA
+# 
+# vals <- rep(NA, ncell(rast))
+# 
+# rast <- setValues(rast, vals)
+
+
+
+# check number of cells
+dim(cells)
+ncell(rast_blank)
+
+# cells is a dataframe with the climate values for the islands, the cell number, and the lat/lon of the cell center
+str(cells)
+
+# rast_blank is an empty raster with the same extent, for saving the genomic turnover to
+str(rast_blank)
+
+# cellNums is a vector containing the cell numbers that we have climate for (they are on the islands and not NA)
+# get only these cells by subsetting cells df
+str(cells[cellNums,])
+
+```
+
+## Mapping functions
+
+```{r mapping_functions}
+
+# again modified from Fitzpatrick and Keller 2015 code
+
+# Mapping spatial genetic variation --------------------------------------------
+###### functions to support mapping #####
+# builds RGB raster from transformed environment
+# snpPreds = dataframe of transformed variables from gf or gdm model
+# rast = a raster mask to which RGB values are to be mapped
+# cellNums = cell IDs to which RGB values should be assigned
+pcaToRaster <- function(snpPreds, rast, mapCells){
+  #require(raster)
+  
+  pca <- prcomp(snpPreds, center=TRUE, scale.=FALSE)
+    
+  ##assigns to colors, edit as needed to maximize color contrast, etc.
+  a1 <- pca$x[,1]; a2 <- pca$x[,2]; a3 <- pca$x[,3]
+  # original from script
+  #r <- a1+a2; g <- -a2; b <- a3+a2-a1
+  # here just sent them to values of pca
+  r <- a1
+  g <- a2
+  b <- a3
+  
+  ##scales colors
+  scalR <- (r-min(r))/(max(r)-min(r))*255
+  scalG <- (g-min(g))/(max(g)-min(g))*255
+  scalB <- (b-min(b))/(max(b)-min(b))*255
+  
+  # scalR <- (r-min(r))/(max(r)-min(r))*255
+  # scalG <- (g-min(g))/(max(r)-min(r))*255
+  # scalB <- (b-min(b))/(max(r)-min(r))*255
+  
+  ##assigns color to raster
+  rast1 <- rast2 <- rast3 <- rast
+  rast1[mapCells] <- scalR
+  rast2[mapCells] <- scalG
+  rast3[mapCells] <- scalB
+  
+  # vector of colors
+  cols <- rgb(scalR, scalG, scalB, maxColorValue = 255)
+  ##stacks color rasters
+  outRast <- rast(list(rast1, rast2, rast3))
+  #return(outRast)
+  return(list(raster = outRast, cols = cols, pca = pca))
+}
+
+
+# Function to map difference between spatial genetic predictions
+# predMap1 = dataframe of transformed variables from gf or gdm model for first set of SNPs
+# predMap2 = dataframe of transformed variables from gf or gdm model for second set of SNPs
+# rast = a raster mask to which Procrustes residuals are to be mapped
+# mapCells = cell IDs to which Procrustes residuals values should be assigned
+RGBdiffMap <- function(predMap1, predMap2, rast, mapCells){
+  require(vegan)
+  PCA1 <- prcomp(predMap1, center=TRUE, scale.=FALSE)
+  PCA2 <- prcomp(predMap2, center=TRUE, scale.=FALSE)
+  diffProcrust <- procrustes(PCA1, PCA2, scale=TRUE, symmetrical=FALSE)
+  residMap <- residuals(diffProcrust)
+  rast[mapCells] <- residMap
+  return(list(max(residMap), rast))
+}
+
+```
+
+# Mapping
+
+## Genomic turnover
+
+```{r mapping}
+
+# OK, on to mapping. Script assumes:
+# (1) a dataframe named env_trns containing extracted raster data (w/ cell IDs)
+# and env. variables used in the models & with columns as follows: cell, bio1, bio2, etc.
+#
+# (2) a raster mask of the study region to which the RGB data will be written
+
+# just get cells with no NAs for climate
+env_trns <- cells[complete.cases(cells),]
+
+# transform env using gf models, see ?predict.gradientForest
+pred <- predict(gf.cand, env_trns[,vars])
+
+# map continuous variation
+color_map <- pcaToRaster(pred, rast_blank, cellNums)
+map <- color_map$raster
+
+# the plot!
+
+# get shapefiles for coastlines
+# California (for comparison plot)
+coast_ca <- read_sf('shapefiles/channel_islands_shapefile/xw602fs2985.shp')
+
+# for baja island coastline
+coast <- read_sf('shapefiles/mexico_coastline/conjunto_de_datos/linea_costa_mex_2022.shp')
+# it's a large shapefile, so crop to just guadalupe
+coast <- st_crop(coast, xmin = -118.4, xmax = -118.1, ymin = 28.8, ymax = 29.3)
+plot(coast$geometry)
+
+
+#png(file = 'turnover_map_gradient_forest_MEMthreshold150_ldPrunedDataset.png', height = 8, width = 10, res = 300, units = 'in')
+
+par(mfrow = c(1,1), mar = c(5,4,4,3))
+
+# first plot borders to set the axes
+# plot(coast$geometry)
+# # add cell colors
+# plotRGB(map, smooth = F, add = T)
+# # add borders again since cells covered them
+# plot(coast$geometry, add = T)
+plotRGB(map, smooth = F)
+
+# add island labels
+text_size <- 1.3
+text(-120.12, 33.85, labels = 'Santa Rosa', cex = text_size)
+text(-119.75, 33.85, 'Santa Cruz', cex = text_size)
+text(-119.4, 33.85, 'Anacapa', cex = text_size)
+text(-118.7, 33.4, 'Catalina', cex = text_size)
+text(-118.8, 32.9, 'San Clemente', cex = text_size)
+text(-118.4, 29, 'Guadalupe', cex = text_size)
+
+# add sample locations
+points(clim$lon, clim$lat, pch = 16, cex = 0.7, col = rgb(0,0,0,0.5))
+
+# add borders
+plot(coast$geometry, add = T)
+plot(coast_ca$geometry, add = T)
+
+#dev.off()
+
+# function to plot as panels
+
+# set up extents for islands
+# Santa Rosa
+ext.sri <- ext(c(-120.25, -119.95, 33.85, 34.05))
+# Santa Cruz
+ext.sci <- ext(c(-119.93, -119.5, 33.9, 34.1))
+# Anacapa
+ext.ana <- ext(c(-119.455, -119.35, 33.98, 34.04))
+# Catalina
+ext.cat <- ext(c(-118.65, -118.27, 33.27, 33.5))
+# San Clemente
+ext.scl <- ext(c(-118.65, -118.3, 32.76, 33.05))
+# Guadalupe
+ext.guad <- ext(c(-118.45, -118.15, 28.8, 29.25))
+
+ext.all <- list(ext.sri, ext.sci, ext.ana, ext.cat, ext.scl, ext.guad)
+names(ext.all) <- c('Santa Rosa', 'Santa Cruz', 'Anacapa', 'Catalina', 'San Clemente', 'Guadalupe')
+
+plot_map_panel_rgb <- function(map, extents){
+  
+  n_isl <- length(extents)
+  
+  par(mfrow = c(1, n_isl), mar = c(5,4.5,4,2))
+  
+  for(n in 1:n_isl){
+    
+    extent <- extents[[n]]
+    
+    # first plot island borders to set the axes
+    plot(coast$geometry, 
+         extent = extent, 
+         main = names(extents)[n], 
+         axes = T,
+         cex.main = 1.5, 
+         cex.axis = 1,
+         las = 2)
+    #plot(map, add = T)
+    # add cell colors
+    terra::plotRGB(map,
+          r=1, g=2, b=3,
+         smooth = F,
+         add = T,
+         legend = ifelse(n = 1, T, F))
+   # add borders again since cells covered them
+    plot(coast$geometry, add = T)
+    plot(coast_ca$geometry, add = T)
+    # add sample locations
+    points(clim$lon, clim$lat, pch = 1, cex = 2, col = rgb(0,0,0,0.5))
+    
+    # sbar is from terra and doesn't plot when sf is used to plot first
+    #sbar(10, xy = 'bottom', type = 'bar', below = 'km', cex = 1.5, adj = c(0.5, 1.5))
+    
+  }  
+  
+  # reset mfrow
+  par(mfrow = c(1,1))
+}
+
+
+#png(file = 'results/gradient_forest/candGuadalupe/map_genomic_turnover_candidate_SNPs_Guadalupe.png', height = 4, width = 18, res = 300, units = 'in')
+plot_map_panel_rgb(map, extent = ext.all)
+#dev.off()
+
+# version with just Guadalupe and Catalina
+#png(file = 'results/gradient_forest/candGuadalupe/map_genomic_turnover_candidate_SNPs_Guadalupe_Catalina.png', height = 5, width = 7, res = 300, units = 'in')
+
+plot_map_panel_rgb(map, extent = list('Catalina'=ext.cat, 'Guadalupe'=ext.guad))
+
+#dev.off()
+
+
+```
+
+
+## Climate PCA
+
+```{r clim_pca}
+
+# plot PCA with predicted values for each cell, and loadings of scaled climate variables
+
+pca <- color_map$pca
+cols <- color_map$cols
+
+# function for plotting
+plot_clim_pca <- function(pca, axis_x, axis_y, varnames = vars, text_cex = 1.5){
+  
+  clim_scaled_x <- scales::rescale(pca$rotation[,axis_x], to = range(pca$x[,axis_x]))
+  clim_scaled_y <- scales::rescale(pca$rotation[,axis_y], to = range(pca$x[,axis_y]))
+  
+  # add padding to axes
+  pad <- 0.2
+  xmin <- min(pca$x[,axis_x]) + pad*min(pca$x[,axis_x])
+  xmax <- max(pca$x[,axis_x]) + pad*max(pca$x[,axis_x])
+  ymin <- min(pca$x[,axis_y]) + pad*min(pca$x[,axis_y])
+  ymax <- max(pca$x[,axis_y]) + pad*max(pca$x[,axis_y])
+  
+  plot(pca$x[,axis_x], pca$x[,axis_y], 
+       col = cols, 
+       pch = 16, 
+       cex = 1.5,
+       axes = T, 
+       xlim = c(xmin, xmax),
+       ylim = c(ymin, ymax),
+       xlab = paste('PC', axis_x, sep = ''), 
+       ylab = paste('PC', axis_y, sep = ''), 
+       cex.axis = 1.2, 
+       cex.lab = 1.5)
+  
+  text(clim_scaled_x, 
+       clim_scaled_y,
+       varnames,
+       cex = text_cex,
+       pos = 3,
+       family = 'bold')
+  # add a line from the origin to climate
+  for(n in 1:length(clim_scaled_x)){
+    arrows(0, 0, clim_scaled_x[n], clim_scaled_y[n], code = 2, length = 0.1, lwd = 1.5)
+  }
+  
+}
+
+
+par(mar = c(5,4,4,3), mfrow = c(1,2))
+plot_clim_pca(pca, 1, 2)
+plot_clim_pca(pca, 1, 3)
+plot_clim_pca(pca, 1, 4)
+plot_clim_pca(pca, 1, 5)
+plot_clim_pca(pca, 1, 6)
+
+#png(file = 'results/gradient_forest/candGuadalupe/gf_scaled_climate_PCA_noGuadAna_PC-1-3_vertical.png', height = 8, width = 4, res = 300, units = 'in')
+par(mfrow = c(2,1), mar = c(4,5,1,1), cex = 0.8)
+plot_clim_pca(pca, 1, 2)
+plot_clim_pca(pca, 1, 3)
+#dev.off()
+
+
+#png(file = 'results/gradient_forest/candGuadalupe/gf_scaled_climate_PCA_noGuadAna_PC-1-3_horizontal.png', height = 4, width = 8, res = 300, units = 'in')
+par(mfrow = c(1,2), mar = c(4,5,1,1), cex = 0.8)
+plot_clim_pca(pca, 1, 2)
+plot_clim_pca(pca, 1, 3)
+#dev.off()
+
+
+# with longer names
+dput(rownames(pca$rotation))
+# with newlines
+varnames <- c("Max Temp\nWarmest Month", "Min Temp\nColdest Month", "Precipitation\nSeasonality", "Precipitation\nWarmest Quarter", "Precipitation\nColdest Quarter", "Elevation")
+#varnames <- c("Max Temp Warmest Month", "Min Temp Coldest Month", "Precip Seasonality", "Precip Warmest Quarter", "Precip Coldest Quarter", "Elevation")
+
+
+#png(file = 'results/gradient_forest/candGuadalupe/gf_scaled_climate_PCA_noGuadAna_PC-1-3_horizontal_longnames.png', height = 4, width = 10, res = 300, units = 'in')
+par(mfrow = c(1,2), mar = c(4,5,1,1), cex = 0.8)
+plot_clim_pca(pca, 1, 2, varnames = varnames, text_cex = 0.8)
+plot_clim_pca(pca, 1, 3, varnames = varnames, text_cex = 0.8)
+#dev.off()
+
+#png(file = 'results/gradient_forest/candGuadalupe/gf_scaled_climate_PCA_noGuadAna_PC-1-3_vertical_longnames.png', height = 8, width = 4, res = 300, units = 'in')
+par(mfrow = c(2,1), mar = c(4,5,1,1), cex = 0.8)
+plot_clim_pca(pca, 1, 2, varnames = varnames, text_cex = 0.8)
+plot_clim_pca(pca, 1, 3, varnames = varnames, text_cex = 0.8)
+#dev.off()
+
+
+
+```
+
+
+## Genomic Offsets
+
+```{r setup_offsets_future_climate}
+
+# setup for offsets by getting rasters for future climate
+
+# the four models I'm using
+# MIROC and CNRM, 4.5 and 8.5, for 2050
+future_string <- c('mr45bi50', 'mr85bi50', 'cn45bi50', 'cn85bi50')
+future_names <- c('MIROC 4.5 2050', 'MIROC 8.5 2050', 'CNRM 4.5 2050', 'CNRM 8.5 2050')
+
+# first load one raster to get CRS info
+bio1 <- rast(paste('climate/bioclim/future/cmip5/', future_string[1], '1.tif', sep = ''))
+
+# crop raster
+
+# see example in crop()
+# note: the bioclim raster still has to be mounted even though it's loaded into R
+# get extent - includes california islands
+ext.ca <-ext(c(-121,-117.5,28.5,35))
+bio1 <- crop(bio1, ext.ca)
+
+plot(bio1)
+
+# now make extent objects to crop out mainland and get only values for the islands
+
+# northern
+isl.n <- ext(c(-120.3, -119.3, 33.8, 34.1))
+bio1.n <- crop(bio1, isl.n)
+plot(bio1.n)
+# southern
+isl.s <- ext(c(-118.7, -118.1, 32.7, 33.5))
+bio1.s <- crop(bio1, isl.s)
+plot(bio1.s)
+# Guadalupe
+isl.g <- ext(c(-118.4, -118.1, 28.8, 29.3))
+bio1.g <- crop(bio1, isl.g)
+plot(bio1.g)
+
+
+# combine all islands
+bio1 <- merge(bio1.n, bio1.s, bio1.g)
+plot(bio1)
+
+
+# bio1 is a SpatRaster object that only includes the California islands
+
+# now get all the clim rasters used in the gf model
+
+dput(vars)
+# c("bio5", "bio6", "bio15", "bio18", "bio19", "elev")
+
+# the future climates just have the bioclim number at the end
+# also remove elevation since it isn't in the future projects
+vars_file <- gsub('bio', '', vars)
+vars_file <- vars_file[vars_file != 'elev']
+dput(vars_file)
+# c("5", "6", "15", "18", "19")
+
+
+setup_climate <- function(future_string, vars_file){
+  
+  cells_list <- list()
+  
+  # first get all the climate rasters
+  for(n in 1:length(vars_file)){
+    
+    ra <- rast(paste('climate/bioclim/future/cmip5/', future_string, vars_file[n], '.tif', sep = ''))
+    
+    # crop to northern and southern islands, then re-combine them
+    # northern
+    ra.n <- crop(ra, isl.n)
+    #plot(ra.n)
+    # southern
+    ra.s <- crop(ra, isl.s)
+    #plot(ra.s)
+    # guadalupe
+    ra.g <- crop(ra, isl.g)
+    plot(isl.g)
+    
+    ra <- merge(ra.n, ra.s, ra.g)
+    
+    plot(ra, main = paste('bio', vars_file[n], '\n', future_string, sep = ''))
+    
+    # extract values for islands from raster
+    df <- extract(ra, ext(ra), cells = T, xy = F)
+    colnames(df)[2] <- vars[n]
+    
+    cells_list[[n]] <- df
+    
+  }
+  
+  #extract another copy, this time with the lat/lon of the center of the cell
+  cells_with_xy <- terra::extract(ra, ext(ra), cells = T, xy = T)
+  
+  # add elevation separately, from current climate
+  
+  ra <- rast('climate/bioclim/worldclim_2.1_30sec/wc2.1_30s_elev.tif')
+  
+  # crop to northern and southern islands, then re-combine them
+  # northern
+  ra.n <- crop(ra, isl.n)
+  #plot(ra.n)
+  # southern
+  ra.s <- crop(ra, isl.s)
+  #plot(ra.s)
+  # guadalupe
+  ra.g <- crop(ra, isl.g)
+  #plot(ra.g)
+  
+  ra <- merge(ra.n, ra.s, ra.g)
+  
+  plot(ra, main = 'elevation')
+  
+  # extract values for islands from raster
+  df <- extract(ra, ext(ra), cells = T, xy = F)
+  colnames(df)[2] <- 'elev'
+  
+  # add as last element of list
+  cells_list[[length(cells_list)+1]] <- df
+  
+  
+  
+  # check that they all have the same number of cells
+  lapply(cells_list, dim)
+  # [1] 44352     2
+  
+  # combine the extracted climate values into a dataframe
+  # first two
+  cells <- merge(cells_list[[1]], cells_list[[2]], by = 'cell')
+  # then loop through rest
+  
+  for(n in 3:length(cells_list)){
+    
+    cells <- merge(cells, cells_list[[n]], by = 'cell')
+    
+  }
+  
+  # add xy values
+  cells$x <- cells_with_xy$x
+  cells$y <- cells_with_xy$y
+  
+  # look at correlations
+  # this is slow, can comment out
+  #plot(cells)
+  
+  return(cells)
+}
+
+# now loop through each future scenario and get cell info
+futures <- list() 
+for(n in 1:length(future_string)){
+  
+  futures[[n]] <- setup_climate(future_string[n], vars_file)
+  names(futures)[n] <- gsub(' ', '_', future_names[n])
+  
+}
+
+
+
+# set up empty raster, for saving turnover results to
+
+# do the same as above - using elevation file as a template
+# values are the cell numbers with values = T
+ra <- rast('climate/bioclim/worldclim_2.1_30sec/wc2.1_30s_elev.tif')
+
+# crop to northern and southern islands, then re-combine them
+# northern
+ra.n <- crop(ra, isl.n)
+plot(ra.n)
+# southern
+ra.s <- crop(ra, isl.s)
+plot(ra.s)
+# guadalupe
+ra.g <- crop(ra, isl.g)
+plot(ra.g)
+
+ra <- merge(ra.n, ra.s, ra.g)
+
+plot(ra)
+
+# save to blank raster
+rast_blank <- rast(ra, vals = NA)
+
+
+# cell numbers we want to use - the ones without NAs
+# here just doing it for the first scenario - I think it should be the same for all of them but check if this causes problems
+# do this in plotting section?
+cellNums <- futures[[1]]$cell[complete.cases(futures[[1]])]
+
+head(futures[[1]][cellNums,])
+
+
+
+################################
+# description of objects
+
+# cellNums is a vector containing the cell numbers that we have climate for (they are on the islands and not NA)
+# get only these cells by subsetting cells df
+str(futures[[1]][cellNums,])
+
+
+# check number of cells
+lapply(futures, dim)
+ncell(rast_blank)
+
+# futures is a list of the climate scenarios
+# each one is a dataframe with the future climate values for the islands under that scenario, the cell number, and the lat/lon of the cell center
+lapply(futures, str)
+
+# rast_blank is an empty raster with the same extent, for saving the genomic turnover to
+str(rast_blank)
+
+
+
+```
+
+
+```{r offset_plots}
+
+# Calculate and map "genetic offset" under climate change ----------------------
+# Script assumes:
+  # (1) a dataframe of transformed env. variables for CURRENT climate 
+  # (e.g., predGI5 from above).
+  #
+  # (2) a dataframe named env_trns_future containing extracted raster data of 
+  # env. variables for FUTURE a climate scenario, same structure as env_trns
+
+# loop through future scenarios
+
+offsets <- list()
+
+scaled_gf_clim <- list()
+
+for(n in 1:length(futures)){
+  
+  fut <- futures[[n]]
+  
+  env_trns_future <- fut[complete.cases(fut),]
+  
+  # some of the cells with present data are missing in the future data
+  env_trns[! env_trns$cell %in% env_trns_future$cell,]
+  # remove them
+  env_trns <- env_trns[env_trns$cell %in% env_trns_future$cell, ]
+
+  
+  # check for mismatches
+  sum(env_trns$cell != env_trns_future$cell)
+  
+  # convert rownames (cell numbers) from character to numeric
+  # this isn't working?
+  # rownames(env_trns) <- as.numeric(rownames(env_trns))
+  # rownames(env_trns_future) <- as.numeric(rownames(env_trns_future))
+  
+  # rerun prediction for present climate
+  hist.cand <- predict(gf.cand, env_trns[,vars])
+  
+  # prediction for future climate
+  fut.cand <- predict(gf.cand, env_trns_future[,vars])
+  # save for using later
+  scaled_gf_clim[[n]] <- fut.cand
+  
+  # calculate euclidean distance between current and future genetic spaces  
+  genOffset <- sqrt((fut.cand[,1]-hist.cand[,1])^2+(fut.cand[,2]-hist.cand[,2])^2
+                    +(fut.cand[,3]-hist.cand[,3])^2+(fut.cand[,4]-hist.cand[,4])^2
+                    +(fut.cand[,5]-hist.cand[,5])^2+(fut.cand[,6]-hist.cand[,6])^2)
+  
+  # assign values to raster - can be tricky if current/future climate
+  # rasters are not identical in terms of # cells, extent, etc.
+  offset <- rast_blank
+  offset[cellNums] <- genOffset
+  
+  offsets[[n]] <- offset
+  
+}
+
+# add historic climate to the list of scaled climates
+scaled_gf_clim[[length(scaled_gf_clim)+1]] <- hist.cand
+names(scaled_gf_clim) <- c(names(futures), 'historic')
+
+names(offsets) <- names(futures)
+
+pal <- colorRampPalette(brewer.pal(9, 'YlOrRd'))
+
+for(n in 1:length(offsets)){
+  
+  offset <- offsets[[n]]
+  
+  #png(file = 'genetic_offset_map_cand_SNPs_MIROC85.png', height = 8, width = 12, res = 300, units = 'in')
+  
+  par(mfrow = c(1,1), mar = c(5,4,4,3))
+  
+  # first plot island borders to set the axes
+  #plot(coast$geometry, main = future_names[n])
+  # add cell colors
+  plot(offset, smooth = F,  col = pal(100), add = F)
+  # add borders again since cells covered them
+  plot(coast$geometry, add = T)
+  # add sample locations
+  points(clim$lon, clim$lat, pch = 1, cex = 0.7, col = rgb(0,0,0,0.5))
+  
+  # add island labels
+  text_size <- 1.3
+  text(-120.12, 33.85, labels = 'Santa Rosa', cex = text_size)
+  text(-119.75, 33.85, 'Santa Cruz', cex = text_size)
+  text(-119.4, 33.85, 'Anacapa', cex = text_size)
+  text(-118.7, 33.4, 'Catalina', cex = text_size)
+  text(-118.8, 32.9, 'San Clemente', cex = text_size)
+  text(-118.4, 29, 'Guadalupe', cex = text_size)
+  
+  sbar(40, xy = 'bottomleft', divs = 4, lonlat = T, type = 'bar', below = 'km', cex = 1.5, adj = c(0.5, 1.5))
+  
+  #dev.off()
+  
+  
+}
+
+# version with the same color scale
+# get min and max when all rasters are considered
+min <- min(sapply(1:length(offsets), function(n) minmax(offsets[[n]])[1]))
+max <- max(sapply(1:length(offsets), function(n) minmax(offsets[[n]])[2]))
+
+# colf <- colorRamp2(breaks = seq(from = min, to = max, length.out = 9),
+#                    colors = brewer.pal(9, 'YlOrRd'))
+
+
+for(n in 1:length(offsets)){
+  
+  offset <- offsets[[n]]
+  
+  #png(file = 'genetic_offset_map_cand_SNPs_MIROC85.png', height = 8, width = 12, res = 300, units = 'in')
+  
+  par(mfrow = c(1,1), mar = c(5,4,4,3))
+  
+  # first plot island borders to set the axes
+  plot(offset[[1]], main = future_names[n], axes = T, legend = F)
+  # add cell colors
+  plot(offset, smooth = F,  col = pal(100), breaks = seq(from = min, to = max, length.out = 100), add = T, legend = F)
+  # add borders again since cells covered them
+  plot(coast$geometry, add = T)
+  # add sample locations
+  points(clim$lon, clim$lat, pch = 1, cex = 0.7, col = rgb(0,0,0,0.5))
+  
+  # add island labels
+  text_size <- 1.3
+  text(-120.12, 33.85, labels = 'Santa Rosa', cex = text_size)
+  text(-119.75, 33.85, 'Santa Cruz', cex = text_size)
+  text(-119.4, 33.85, 'Anacapa', cex = text_size)
+  text(-118.7, 33.4, 'Catalina', cex = text_size)
+  text(-118.8, 32.9, 'San Clemente', cex = text_size)
+  text(-118.4, 29, 'Guadalupe', cex = text_size)
+  
+  
+  #dev.off()
+  
+  
+}
+
+# function to plot as panels
+
+
+# set up extents for islands
+# Santa Rosa
+ext.sri <- ext(c(-120.25, -119.95, 33.85, 34.05))
+# Santa Cruz
+ext.sci <- ext(c(-119.95, -119.5, 33.7, 34.1))
+# Anacapa
+ext.ana <- ext(c(-119.455, -119.35, 33.9, 34.1))
+# Catalina
+ext.cat <- ext(c(-118.65, -118.25, 33.25, 33.5))
+# San Clemente
+ext.scl <- ext(c(-118.65, -118.25, 32.7, 33.1))
+# Guadalupe
+ext.gua <- ext(c(-118.45, -118.15, 28.8, 29.25))
+
+ext.all <- list(ext.sri, ext.sci, ext.ana, ext.cat, ext.scl, ext.gua)
+names <- c('Santa Rosa', 'Santa Cruz', 'Anacapa', 'Catalina', 'San Clemente', 'Guadalupe')
+
+plot_map_panel <- function(map, extents){
+  
+  n_isl <- length(extents)
+  
+  par(mfrow = c(1, n_isl), mar = c(5,3,4,2))
+  
+  for(n in 1:n_isl){
+    
+    extent <- extents[[n]]
+    
+    # first plot island borders to set the axes
+    plot(map[[1]], 
+         ext = extent, 
+         main = names[n], 
+         axes = T,
+         legend = F,
+         cex.main = 2, 
+         cex.axis = 1)
+    # add cell colors
+    plot(map, 
+         smooth = F,  
+         col = pal(100),
+         breaks = seq(from = min, to = max, length.out = 100),
+         add = T,
+         legend = ifelse(n = 1, T, F))
+    # add borders again since cells covered them
+    plot(coast$geometry, add = T)
+    # add sample locations
+    points(clim$lon, clim$lat, pch = 1, cex = 2, col = rgb(0,0,0,0.5))
+    
+    # note: this doesn't seem to be working
+    sbar(10, xy = 'bottom', type = 'bar', below = 'km', cex = 1.5, adj = c(0.5, 1.5))
+    
+  }  
+  
+  # reset mfrow
+  par(mfrow = c(1,1))
+}
+
+
+# version with the same color scale
+# get min and max when all rasters are considered
+min <- min(sapply(1:length(offsets), function(n) minmax(offsets[[n]])[1]))
+max <- max(sapply(1:length(offsets), function(n) minmax(offsets[[n]])[2]))
+
+for(n in 1:length(offsets)){
+  
+  offset <- offsets[[n]]
+  
+  #png(file = paste('offset_panel_Guadalupe', names(offsets)[n], '_2050.png', sep = ''), height = 4, width = 16, res = 300, units = 'in')
+  plot_map_panel(offsets[[n]], extents = ext.all)
+  
+  #dev.off()
+  
+}
+
+# version with the same color scale
+# get min and max when all rasters are considered
+min <- min(sapply(1:length(offsets), function(n) minmax(offsets[[n]])[1]))
+max <- max(sapply(1:length(offsets), function(n) minmax(offsets[[n]])[2]))
+
+
+for(n in 1:length(offsets)){
+  
+ # png(file = paste('results/gradient_forest/candGuadalupe/offset_only_Guadalupe', names(offsets)[n], '_2050.png', sep = ''), height = 5, width = 3, res = 300, units = 'in')
+  par(cex = 1)
+  
+  plot(offsets[[n]], 
+       ext = ext.gua, 
+       main = names(offsets)[n], 
+       axes = T,
+       legend = F,
+       cex.main = 2, 
+       cex.axis = 1,
+       las = 2)
+  # add cell colors
+  plot(offsets[[n]], 
+       smooth = F,  
+       col = pal(100),
+       breaks = seq(from = min, to = max, length.out = 100),
+       add = T,
+       legend = F)
+  # add sample locations
+  points(clim$lon, clim$lat, pch = 1, cex = 2, col = rgb(0,0,0,0.5))
+  
+  # add coast border
+  plot(coast$geometry, add = T)
+  
+  # hacky way to add legend
+  # source: https://stackoverflow.com/a/70522655
+  legend_image <- as.raster(matrix(rev(pal(100)), ncol=1))
+  
+  #figSet <- c(grconvertX(c(120.5, 120), from="user", to="ndc"), grconvertY(c(33, 34), from="user", to="ndc"))
+  figSet <- c(0.15, 0.35, 0.15, 0.45)
+  
+  ## layer 2, legend inside
+  op <- par(  ## set and store par
+    fig = figSet, 
+    mar = c(0.5, 0.5, 0.5, 0.5), ## set margins
+    new = TRUE) ## set new for overplot w/ next plot
+  
+  plot(c(0, 2), c(0, 1), type='n', axes=F, xlab='', ylab='')  ## ini plot2
+  rasterImage(legend_image, 0, 0, 1, 1) ## the gradient
+  lbsq <- seq.int(0, 1, l=5)   ## seq. for labels
+  axis(4, at=lbsq, pos=1, labels=F, col=0, col.ticks=1, tck=-.1)  ## axis ticks
+  mtext(round(seq.int(min, max, l=5), 2), 4, -.5, at=lbsq, las=2, cex=.8)  ## tick labels
+  mtext('Offset', 3, -.125, cex=1, adj=.1, font=2)  ## legend title
+  
+  par(op)  ## reset par
+  
+  
+  #dev.off()
+  
+}
+
+
+
+
+
+# look at using this 
+#https://stackoverflow.com/questions/76072271/manage-subplots-titles-in-multiple-rastervis-levelplot
+#library(rasterVis)
+
+```
+
+
+# Offset calculations
+
+## Offsets for specific populations, without movement
+
+```{r get_offsets_by_pop}
+
+# look at offsets for specific 'populations' (cells in raster where trees were collected)
+
+# this will get looped
+
+
+# get coords
+clim.sub <- clim[clim$island %in% c("Santa Rosa Island", "Santa Cruz Island", "Anacapa Island", "Catalina Island", "San Clemente Island", "Guadalupe Island"),]
+
+df <- clim.sub[,c('lat', 'lon')]
+coords <- vect(df, geom=c("lon", "lat"))
+
+off.pop <- as.data.frame(matrix(nrow = nrow(clim.sub), ncol = c(10)))
+rownames(off.pop) <- clim.sub$ID_vcf
+colnames(off.pop) <- c('island', 'lat', 'lon', 'cell', 'cell_x', 'cell_y', names(offsets))
+
+off.pop$island <- clim.sub$island
+off.pop$lat <- clim.sub$lat
+off.pop$lon <- clim.sub$lon
+
+
+for(n in 1:length(offsets)){
+  
+  offset <- offsets[[n]]
+  offset_name <- names(offsets)[n]
+
+  # extract offsets for those coords
+  
+  off.tmp <- extract(offset, coords, xy = T, cells = T)
+  colnames(off.tmp) <- c('ID',  offset_name, 'cell', 'x', 'y')
+  
+  off.pop[,offset_name] <- off.tmp[,offset_name]
+  #  add cell info - this overwrites each time which isn't ideal but should be fine since all offset rasters are the same
+  off.pop[,'cell'] <- off.tmp[,'cell']
+  off.pop[,'cell_x'] <- off.tmp[,'x']
+  off.pop[,'cell_y'] <- off.tmp[,'y']
+  
+}
+  
+
+for(n in 1:length(offsets)){
+  
+  offset <- names(offsets)[n]
+  
+  #png(file = paste('results/gradient_forest/offset_boxplot_by_island_pops_', offset, '.png', sep = ''), height = 6, width = 7, res = 300, units = 'in')
+  par(mar = c(10,5,4,3))
+  boxplot(off.pop[,offset] ~ clim.sub$island, las = 2, drop = T,
+          border = c("#3c4a8b", "#009c85", "#84bc5f", "#edb829", "#f57404", "#b30000"),
+          col = 'white',
+          xlab = '',
+          ylab = 'Offset',
+          main = future_names[n])
+  #dev.off()
+  
+}
+
+```
+
+
+## Offsets with assisted gene flow
+
+```{r offsets_with_AGF}
+
+# get the environmental variables for our collection sites
+# the rownames of the env_trns objects are the cell numbers, but as a character
+
+# get the cells where we collected trees, removing duplicates
+off.pop.sort <- off.pop[order(off.pop$island),]
+
+# get row index of unique cells
+unq <- !duplicated(off.pop.sort$cell)
+pop_cells <- as.character(off.pop.sort[unq, 'cell'])
+pop_islands <- off.pop.sort[unq, 'island']
+
+# function for predicting
+# this needs to be the scaled gf values, not raw values
+calc_offset <- function(current, future){
+  
+  sqrt((future[,1]-current[,1])^2+(future[,2]-current[,2])^2
+                    +(future[,3]-current[,3])^2+(future[,4]-current[,4])^2
+                    +(future[,5]-current[,5])^2+(future[,6]-current[,6])^2)
+  
+}
+
+
+# check that it's working and gives same results as above
+
+off <- calc_offset(scaled_gf_clim$historic[pop_cells,], scaled_gf_clim$MIROC_4.5_2050[pop_cells,])
+boxplot(off ~ pop_islands, las = 2)
+
+# predict the offset for each 'population' (cell with trees present) if planted in a different site
+# each column is a 'population'
+# each row is a possible planting site
+# offset is if a population were planted into a given site under its future climate
+# for the rows, we include all cells on the islands as possible planting sites
+# columns are just places we collected trees
+
+off.agf <- list()
+
+# loop through our 4 climate models
+for(n in 1:length(futures)){
+  
+  # set up empty dataframe to save offsets
+  off <- as.data.frame(matrix(nrow = nrow(scaled_gf_clim$historic), ncol = length(pop_cells)))
+  rownames(off) <- rownames(scaled_gf_clim$historic)
+  colnames(off) <- paste(gsub(' ', '_', pop_islands), pop_cells, sep = '_')
+  
+  
+  # calculate offsets for each population and planting site
+  
+  # first loop through current sites
+  for(p in 1:length(pop_cells)){
+    
+    # get the historic climate variables for population
+    pop <- scaled_gf_clim$historic[pop_cells[p], vars]
+    
+    # for each site, calculate offset to other locations in the future
+    # by looping through rows of future climate
+    for(f in 1:nrow(off)){
+      
+      fut <- scaled_gf_clim[[n]][rownames(off)[f], vars]
+      off[f,p] <- calc_offset(pop, fut)
+    }
+  }
+  off.agf[[n]] <- off
+  cat('done with', n)
+}
+
+names(off.agf) <- names(futures)
+
+
+# columns are a population
+# rows are offset for future climate at sites where it could be planted 
+# san clemente is best for most pops because bio5 (max temp warmest month) will actually decrease in the future under this climate model
+
+for(n in 1:length(off.agf)){
+  
+  #png(file = 'results/gradient_forest/offset_with_agf_heatmap_miroc85_2050.png', height = 8, width = 8, res = 300, units = 'in')
+  heatmap(as.matrix(off.agf[[n]]), Rowv = NA, Colv = NA, margins = c(12, 5), scale = 'none', xlab = 'source site', ylab = 'planting site', main = paste('offset with AGF', names(off.agf)[n]))
+#dev.off()
+  
+}
+
+
+
+
+
+# Look at different management scenarios
+
+# SUMMARY PLOT
+# format data to compare across three options: 
+# no movement, movement to best site, and planting from best site
+
+# check order
+cbind(colnames(off.agf$MIROC_4.5_2050), paste(pop_islands, pop_cells))
+
+# setup list to save results for each future climate
+offset.compare <- list()
+offset.best <- list()
+
+# look through future climate, get the best planting site or source site for each population we collected
+for(fut in 1:length(off.agf)){
+  
+  off <- off.agf[[fut]]
+  
+  
+  # set up df for saving the offset values
+  off.compare <- as.data.frame(matrix(nrow = ncol(off), ncol = 5))
+  rownames(off.compare) <- colnames(off)
+  colnames(off.compare) <- c('island', 'no_movement', 'from_best_pop', 'to_best_site', 'to_best_current_site')
+  off.compare$island <- pop_islands
+  
+  # set up similar df for saving the cell IDs of the best site for each scenario
+  off.best <- as.data.frame(matrix(nrow = ncol(off), ncol = 4))
+  rownames(off.best) <- colnames(off)
+  colnames(off.best) <- c('island', 'best_source_pop', 'best_planting_site', 'best_planting_site_current_pop')
+  off.best$island <- pop_islands
+  
+  for(n in 1:nrow(off.compare)){
+    
+    # in off.agf, columns are populations and are named with both island and cell number
+    # rows are just cell numbers (because they include all cells on islands, and I haven't assigned each to the island)
+    site <- rownames(off.compare)[n]
+    # the cell is the last number of the string
+    site_cell <- rev(strsplit(site, '_')[[1]])[1]
+    
+    # no movement - what is offset from the same site
+    off.compare[n, 'no_movement'] <- off[site_cell, site]
+    
+    # to best site - lowest offset in species range for this population
+    # in off.agf, columns are source pops, rows are planting site
+    # get the minimum for this column/population
+    off.compare[n, 'to_best_site'] <- min(off[,site])
+    # which cell is this?
+    off.best[n, 'best_planting_site'] <- rownames(off)[which.min(off[,site])]
+    # which cell is best, including only sites where there are currently trees that we sampled?
+    off.compare[n, 'to_best_current_site'] <- min(off[pop_cells,site])
+    off.best[n, 'best_planting_site_current_pop'] <- rownames(off[pop_cells,])[which.min(off[pop_cells,site])]
+    
+    
+    # from best site - plant another population at this site
+    # get the minimum from this row/planting site
+    off.compare[n, 'from_best_pop'] <- min(off[site_cell,])
+    # which cell is this?
+    off.best[n, 'best_source_pop'] <- colnames(off)[which.min(off[site_cell,])]
+    
+  }
+  
+  offset.compare[[fut]] <- off.compare
+  offset.best[[fut]] <- off.best
+  
+}
+
+
+names(offset.compare) <- names(off.agf)
+names(offset.best) <- names(off.agf)
+
+
+
+# PLOTS
+
+off.compare.long <- list()
+
+for(n in 1:length(offset.compare)){
+  
+  off.compare <- offset.compare[[n]]
+  
+  # first convert to long format for plotting a boxplot
+  off.compare$id <- rownames(off.compare)
+  
+  off.compare.long[[n]] <- reshape(off.compare, direction = 'long', idvar = 'id', varying = c("no_movement", "to_best_current_site", "to_best_site", "from_best_pop"), times = c("no_movement", "to_best_current_site", "to_best_site", "from_best_pop"), timevar = 'strategy',  v.names = 'offset')
+  
+  off.compare.long[[n]]$strategy <- factor(off.compare.long[[n]]$strategy, levels = c("no_movement", "from_best_pop", "to_best_current_site", "to_best_site"))
+  
+  
+  #png(file = 'results/gradient_forest/offset_comparison_3strategies_byIsland.png', height = 10, width = 10, res = 300, units = 'in')
+  #png(file = paste('results/gradient_forest/candGuadalupe/offset_boxplot_3strategies_', names(offset.compare)[n], '.png', sep = ''), 
+  #height = 6, width = 10, res = 300, units = 'in')
+  
+  par(mfrow = c(1,1), mar = c(16,5,4,3))
+  
+  boxplot(off.compare.long[[n]]$offset ~ off.compare.long[[n]]$strategy * off.compare.long[[n]]$island,
+          main = names(offset.compare)[n],
+          names = rep(c('Status quo',  'Ecosystem preservation', 'Species preservation (sampled sites)', 'Species preservation (any site)'), 6),
+          las = 2, 
+          cex.lab = 1.5,
+          cex.main = 1.5,
+          cex.axis = 1.2,
+          xlab = '',
+          ylab = 'Offset', 
+          drop = T, 
+          col = c('grey40', 'grey80', 'grey90', 'white'), 
+          border = rep(c("#3c4a8b", "#009c85", "#84bc5f", "#edb829", "#f57404", "#b30000"), each = 4))
+  legend('topright', fill = c('grey40', 'grey80', 'grey90', 'white'), legend = c('Status quo',  'Ecosystem preservation', 'Species preservation (sampled sites)', 'Species preservation (any site)'), cex = 0.7)
+  
+  #dev.off()
+  
+  # same thing but with only Guadalupe
+  sub <- off.compare.long[[n]][off.compare.long[[n]]$island == 'Guadalupe Island',]
+  
+  #png(file = paste('results/gradient_forest/candGuadalupe/offset_boxplot_3strategies_onlyGuad', names(offset.compare)[n], '.png', sep = ''),
+     # height = 6, width = 4, res = 300, units = 'in')
+  
+  par(mfrow = c(1,1), mar = c(16,5,4,3))
+  
+  boxplot(sub$offset ~ sub$strategy * sub$island,
+          main = names(offset.compare)[n],
+          names = c('Status quo',  'Ecosystem preservation', 'Species preservation (sampled sites)', 'Species preservation (any site)'),
+          las = 2, 
+          cex.lab = 1.5,
+          cex.main = 1.5,
+          cex.axis = 1.2,
+          xlab = '',
+          ylab = 'Offset', 
+          drop = T, 
+          col = c('grey40', 'grey80', 'grey90', 'white'), 
+          border = rep("#b30000", 4))
+  
+  #legend('topright', fill = c('grey40', 'grey80', 'grey90', 'white'), legend = c('No movement',  'Plant with best population', 'Move to best current site', 'Move to best site'), cex = 0.7)
+  #dev.off()
+  
+}
+
+names(off.compare.long) <- names(offset.compare)
+
+
+# make nice tables with best planting/source site
+# note: lat/lons are for the center of the cell, not the exact site of trees
+
+for(n in 1:length(offset.best)){
+  
+  off.best <- offset.best[[n]]
+  
+  # add lat/lons for cells
+  
+  # planting site
+  off.best$best_planting_site_lat <- cells[off.best$best_planting_site, c('y')]
+  off.best$best_planting_site_lon <- cells[off.best$best_planting_site, c('x')]
+  
+  # planting site, current pop
+  off.best$best_planting_site_current_lat <- cells[off.best$best_planting_site_current_pop, c('y')]
+  off.best$best_planting_site_current_lon <- cells[off.best$best_planting_site_current_pop, c('x')]
+  
+  # source pop
+  # get just the cell number
+  # sorry about the readability 
+  # this just splits the string by underscore, then gets the last one using rev()
+  best_cell <- sapply(1:nrow(off.best), function(x) rev(strsplit(off.best$best_source_pop[x], '_')[[1]])[1])
+  off.best$best_source_pop_lat <- cells[best_cell, c('y')]
+  off.best$best_source_pop_lon <- cells[best_cell, c('x')]
+  
+  # rearrange columns
+off.best <- off.best[,c("island", "best_source_pop", "best_source_pop_lat", "best_source_pop_lon", "best_planting_site", "best_planting_site_lat", "best_planting_site_lon", "best_planting_site_current_pop", "best_planting_site_current_lat", "best_planting_site_current_lon")]
+  
+  offset.best[[n]] <- off.best
+}
+
+
+knitr::kable(offset.best[[1]], caption = names(offset.best)[1])
+knitr::kable(offset.best[[2]], caption = names(offset.best)[2])
+knitr::kable(offset.best[[3]], caption = names(offset.best)[3])
+knitr::kable(offset.best[[4]], caption = names(offset.best)[4])
+
+
+```
+
+
+```{r write_offset_files}
+
+# write.csv(off.pop.sort, file = 'results/gradient_forest/candGuadalupe/offsets_by_indiv_no_AGF_guadalupe.csv', row.names = T)
+# save(off.pop.sort, file = 'results/gradient_forest/candGuadalupe/offsets_by_indiv_no_AGF_guadalupe.rda')
+# 
+# write.csv(offset.best, file = 'results/gradient_forest/candGuadalupe/offsets_by_indiv_with_best_AGF_guadalupe.csv')
+# save(offset.best, file = 'results/gradient_forest/candGuadalupe/offsets_by_indiv_with_best_AGF_guadalupe.rda')
+# 
+# save(off.compare.long, file = 'results/gradient_forest/candGuadalupe/offsets_by_strategy_long_format_for_boxplots_guadalupe.rda')
+
+```
+
+
+```{r agf2, eval = F, include = F}
+
+# old code
+
+
+# get the environmental variables for our collection sites
+# the rownames of the env_trns objects are the cell numbers, but as a character
+
+# get the cells where we collected trees, removing duplicates
+off.pop.sort <- off.pop[order(off.pop$island),]
+
+# get row index of unique cells
+unq <- !duplicated(off.pop.sort$cell)
+pop_cells <- as.character(off.pop.sort[unq, 'cell'])
+pop_islands <- off.pop.sort[unq, 'island']
+
+# function for predicting
+# this needs to be the scaled gf values, not raw values
+calc_offset <- function(current, future){
+  
+  sqrt((future[,1]-current[,1])^2+(future[,2]-current[,2])^2
+                    +(future[,3]-current[,3])^2+(future[,4]-current[,4])^2
+                    +(future[,5]-current[,5])^2+(future[,6]-current[,6])^2)
+  
+}
+
+
+# check that it's working and gives same results as above
+
+off <- calc_offset(scaled_gf_clim$historic[pop_cells,], scaled_gf_clim$MIROC_4.5_2050[pop_cells,])
+boxplot(off ~ pop_islands, las = 2)
+
+# predict the offset for each 'population' (cell with trees present) if planted in a different site
+# each column is a 'population'
+# each row is a possible planting site
+# offset is if a population were planted into a given site under its future climate
+# for the rows, we include all cells on the islands as possible planting sites
+# columns are just places we collected trees
+
+# set up cleaner column names
+colnames_off <- paste(gsub(' ', '_', pop_islands), pop_cells, sep = '_')
+colnames_off <- gsub('Island_', '', colnames_off)
+
+off.agf <- list()
+
+# loop through our 4 climate models
+for(n in 1:length(futures)){
+  
+  # set up empty dataframe to save offsets
+  off <- as.data.frame(matrix(nrow = nrow(scaled_gf_clim$historic), ncol = length(pop_cells)))
+  colnames(off) <- colnames_off
+  # add island names to cell names
+  # first make sure names match
+  sum(rownames(scaled_gf_clim$historic) != rownames(env_trns))
+  rownames(off) <- paste(env_trns$island, '_', env_trns$cell, sep = '')
+  
+  
+  # calculate offsets for each population and planting site
+  
+  # first loop through current sites
+  for(p in 1:length(pop_cells)){
+    
+    # get the historic climate variables for population
+    pop <- scaled_gf_clim$historic[pop_cells[p], vars]
+    
+    # for each site, calculate offset to other locations in the future
+    # by looping through rows of future climate
+    for(f in 1:nrow(off)){
+      
+      fut <- scaled_gf_clim[[n]][rownames(env_trns)[f], vars]
+      off[f,p] <- calc_offset(pop, fut)
+    }
+  }
+  off.agf[[n]] <- off
+  cat('done with', n)
+}
+
+names(off.agf) <- names(futures)
+
+
+# columns are a population
+# rows are offset for future climate at sites where it could be planted 
+# san clemente is best for most pops because bio5 (max temp warmest month) will actually decrease in the future under this climate model
+
+for(n in 1:length(off.agf)){
+  
+  #png(file = 'results/gradient_forest/offset_with_agf_heatmap_miroc85_2050.png', height = 8, width = 8, res = 300, units = 'in')
+  heatmap(as.matrix(off.agf[[n]]), Rowv = NA, Colv = NA, margins = c(12, 10), scale = 'none', xlab = 'source site', ylab = 'planting site', main = paste('offset with AGF', names(off.agf)[n]))
+#dev.off()
+  
+}
+
+
+
+
+
+# Look at different management scenarios
+
+# SUMMARY PLOT
+# format data to compare across three options: 
+# no movement, movement to best site, and planting from best site
+
+# check order
+cbind(colnames(off.agf$MIROC_4.5_2050), paste(pop_islands, pop_cells))
+
+# setup list to save results for each future climate
+offset.compare <- list()
+offset.best <- list()
+
+# look through future climate, get the best planting site or source site for each population we collected
+for(fut in 1:length(off.agf)){
+  
+  off <- off.agf[[fut]]
+  
+  
+  # set up df for saving the offset values
+  off.compare <- as.data.frame(matrix(nrow = ncol(off), ncol = 5))
+  rownames(off.compare) <- colnames(off)
+  colnames(off.compare) <- c('island', 'no_movement', 'from_best_pop', 'to_best_site', 'to_best_current_site')
+  off.compare$island <- pop_islands
+  
+  # set up similar df for saving the cell IDs of the best site for each scenario
+  off.best <- as.data.frame(matrix(nrow = ncol(off), ncol = 4))
+  rownames(off.best) <- colnames(off)
+  colnames(off.best) <- c('island', 'best_source_pop', 'best_planting_site', 'best_planting_site_current_pop')
+  off.best$island <- pop_islands
+  
+  for(n in 1:nrow(off.compare)){
+    
+    # in off.agf, columns are populations and are named with both island and cell number
+    # rows are the same, but include all cells on the islands
+    site <- rownames(off.compare)[n]
+    # the cell is the last number of the string
+    #site <- rev(strsplit(site, '_')[[1]])[1]
+
+    
+    # no movement - what is offset from the same site
+    off.compare[n, 'no_movement'] <- off[site,site]
+    
+    # to best site - lowest offset in species range for this population
+    # in off.agf, columns are source pops, rows are planting site
+    # get the minimum for this column/population
+    off.compare[n, 'to_best_site'] <- min(off[,site])
+    # which cell is this?
+    off.best[n, 'best_planting_site'] <- rownames(off)[which.min(off[,site])]
+    # which cell is best, including only sites where there are currently trees that we sampled?
+    # colnames(off) here is grabbing the cells where we collected by name
+    off.compare[n, 'to_best_current_site'] <- min(off[colnames(off),site])
+    off.best[n, 'best_planting_site_current_pop'] <- rownames(off[colnames(off),])[which.min(off[colnames(off),site])]
+    
+    
+    # from best site - plant another population at this site
+    # get the minimum from this row/planting site
+    off.compare[n, 'from_best_pop'] <- min(off[site,])
+    # which cell is this?
+    off.best[n, 'best_source_pop'] <- colnames(off)[which.min(off[site,])]
+    
+  }
+  
+  offset.compare[[fut]] <- off.compare
+  offset.best[[fut]] <- off.best
+  
+}
+
+
+names(offset.compare) <- names(off.agf)
+names(offset.best) <- names(off.agf)
+
+
+
+# PLOTS
+
+for(n in 1:length(offset.compare)){
+  
+  off.compare <- offset.compare[[n]]
+  
+  # first convert to long format for plotting a boxplot
+  off.compare$id <- rownames(off.compare)
+  
+  off.compare.long <-reshape(off.compare, direction = 'long', idvar = 'id', varying = c("no_movement", "to_best_current_site", "to_best_site", "from_best_pop"), times = c("no_movement", "to_best_current_site", "to_best_site", "from_best_pop"), timevar = 'strategy',  v.names = 'offset')
+  
+  off.compare.long$strategy <- factor(off.compare.long$strategy, levels = c("no_movement", "from_best_pop", "to_best_current_site", "to_best_site"))
+  
+  
+  #png(file = 'results/gradient_forest/offset_comparison_3strategies_byIsland.png', height = 10, width = 10, res = 300, units = 'in')
+  par(mfrow = c(1,1), mar = c(16,5,4,3))
+  boxplot(off.compare.long$offset ~ off.compare.long$strategy * off.compare.long$island,
+          main = names(offset.compare)[n],
+          names = rep(c('Status quo',  'Ecosystem preservation', 'Species preservation (sampled sites)', 'Species preservation (any site)'), 5),
+          las = 2, 
+          cex.lab = 1.5,
+          cex.main = 1.5,
+          cex.axis = 1.2,
+          xlab = '',
+          ylab = 'Offset', 
+          drop = T, 
+          col = c('grey40', 'grey80', 'grey90', 'white'), 
+          border = rep(c("#3c4a8b", "#009c85", "#84bc5f", "#edb829", "#f57404"), each = 4))
+  legend('topright', fill = c('grey40', 'grey80', 'grey90', 'white'), legend = c('Status quo',  'Ecosystem preservation', 'Species preservation (sampled sites)', 'Species preservation (any site)'), cex = 0.7)
+  #dev.off()
+  
+}
+
+# testing ggplot
+# ggplot(data = off.compare.long, mapping = aes(y = offset, x = interaction(off.compare.long$strategy, off.compare.long$island), fill = island)) + 
+#   geom_boxplot() +
+#   geom_point()
+
+
+
+# make nice tables with best planting/source site
+# note: lat/lons are for the center of the cell, not the exact site of trees
+
+for(n in 1:length(offset.best)){
+  
+  off.best <- offset.best[[n]]
+  
+  # add lat/lons for cells
+  
+  # planting site
+  off.best$best_planting_site_lat <- cells[off.best$best_planting_site, c('y')]
+  off.best$best_planting_site_lon <- cells[off.best$best_planting_site, c('x')]
+  
+  # planting site, current pop
+  off.best$best_planting_site_current_lat <- cells[off.best$best_planting_site_current_pop, c('y')]
+  off.best$best_planting_site_current_lon <- cells[off.best$best_planting_site_current_pop, c('x')]
+  
+  # source pop
+  # get just the cell number
+  # sorry about the readability 
+  # this just splits the string by underscore, then gets the last one using rev()
+  best_cell <- sapply(1:nrow(off.best), function(x) rev(strsplit(off.best$best_source_pop[x], '_')[[1]])[1])
+  off.best$best_source_pop_lat <- cells[best_cell, c('y')]
+  off.best$best_source_pop_lon <- cells[best_cell, c('x')]
+  
+  # rearrange columns
+off.best <- off.best[,c("island", "best_source_pop", "best_source_pop_lat", "best_source_pop_lon", "best_planting_site", "best_planting_site_lat", "best_planting_site_lon", "best_planting_site_current_pop", "best_planting_site_current_lat", "best_planting_site_current_lon")]
+  
+  offset.best[[n]] <- off.best
+}
+
+
+knitr::kable(offset.best[[1]], caption = names(offset.best)[1])
+knitr::kable(offset.best[[2]], caption = names(offset.best)[2])
+knitr::kable(offset.best[[3]], caption = names(offset.best)[3])
+knitr::kable(offset.best[[4]], caption = names(offset.best)[4])
+
+
+```
+
+
+```{r agf_maps, eval = F, include = F}
+
+# old code
+
+#################################################
+# for each pop, make a map showing future offset
+# if you select a population, where would it grow best?
+
+#pdf(file = 'results/gradient_forest/offset_with_agf_maps_by_population_miroc85_2050.pdf', width = 20, height = 18)
+par(mfrow = c(3,4), mar = c(2,3,2,4))
+for(n in 1:nrow(pred.cand.sub)){
+  
+  off <- calc_offset(pred.cand.sub[n,], proj.cand)
+  
+  # assign values to raster
+  rast[cellIndex] <- off
+  
+  pal <- colorRampPalette(brewer.pal(9, 'YlOrRd'))
+  
+  #png(file = '.png', height = 8, width = 12, res = 300, units = 'in')
+  
+  # first plot borders to set the axes
+  plot(coast$geometry,  main = paste(rownames(off.agf)[n], '\n', 'MIROC RCP 8.5 2050', sep = ''))
+  # add cells
+  plot(rast, col = pal(100), add = T)
+  # add borders again since cells covered them
+  plot(coast$geometry, add = T)
+  # add sample locations
+  points(clim.sub$lon, clim.sub$lat, pch = 16, cex = 0.7, col = rgb(0,0,0,0.5))
+  points(sites.uniq$lon[n], sites.uniq$lat[n], pch = 21, cex = 1, lwd = 2, col = 'black', bg = 'white')
+  
+  # add island labels
+  # text_size <- 1.3
+  # text(-120.12, 33.85, labels = 'Santa Rosa', cex = text_size)
+  # text(-119.75, 33.85, 'Santa Cruz', cex = text_size)
+  # text(-119.4, 33.85, 'Anacapa', cex = text_size)
+  # text(-118.7, 33.4, 'Catalina', cex = text_size)
+  # text(-118.8, 32.9, 'San Clemente', cex = text_size)
+  
+  
+}
+
+#dev.off()
+
+
+
+#############################################
+# for each site, make a map showing the best genotypes for that site in the future
+
+#pdf(file = 'results/gradient_forest/offset_with_agf_maps_by_site_miroc85_2050.pdf', width = 20, height = 18)
+par(mfrow = c(3,4), mar = c(2,3,2,4))
+for(n in 1:nrow(proj.cand.sub)){
+  
+  # look at one future value and all current sites where trees exist
+  off <- calc_offset(pred.cand.sub, proj.cand.sub[n,])
+  
+  # assign values to raster
+  rast[cellIndex] <- NA
+  rast[sites.uniq$cells] <- off
+  
+  pal <- colorRampPalette(brewer.pal(9, 'YlOrRd'))
+  
+  #png(file = '.png', height = 8, width = 12, res = 300, units = 'in')
+  
+  # first plot borders to set the axes
+  plot(coast$geometry,  main = paste(rownames(off.agf)[n], '\n', 'MIROC RCP 8.5 2050', sep = ''))
+  # add cells
+  plot(rast, col = pal(100), add = T)
+  # add borders again since cells covered them
+  plot(coast$geometry, add = T)
+  # add sample locations
+  #points(clim.sub$lon, clim.sub$lat, pch = 16, cex = 0.7, col = rgb(0,0,0,0.5))
+  points(sites.uniq$lon[n], sites.uniq$lat[n], pch = 21, cex = 1, lwd = 2, col = 'black', bg = 'white')
+  
+}
+#dev.off()
+
+```

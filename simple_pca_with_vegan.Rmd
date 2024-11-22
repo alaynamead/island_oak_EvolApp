@@ -1,0 +1,392 @@
+---
+title: "PCA of SNP data"
+author: "Alayna Mead"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    number_sections: true
+  pdf_document:
+    toc: true
+    number_sections: true
+    highlight: kate
+---
+
+Plot PCAs from processed SNP data using vegan
+
+# Setup
+
+## packages and data
+
+```{r setup}
+
+library('vegan') # redundancy analysis
+library('adegenet') # read.PLINK()
+library('psych') # pairs.panels()
+
+# Following:
+#https://popgen.nescent.org/2018-03-27_RDA_GEA.html
+
+# site data - named dat, needs to be renamed
+load('data/clean/CCGP_samples_channel_islands_clean.rda')
+info <- dat
+
+# use this to read SNPs!
+dat <- read.PLINK('data/raw/Qtom107.Qchr17.Qssp3.20220906.qlob.ef.repeatsOut.renamedChrsVars.biallelicSNPs.meanDP5.genoDP5.MAF0.01.missing0.9.ldPruned.additive.raw', 
+                  n.cores = 2, 
+                  quiet = F)
+
+sessionInfo()
+
+
+```
+
+```{r markdown_settings}
+
+knitr::opts_chunk$set(fig.width = 10, fig.height = 8)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 80), tidy = TRUE)
+
+```
+
+## setup SNP data
+
+```{r snp_data_setup}
+
+# look at dataset
+# it omits the non-SNP info
+dat
+dim(dat)
+
+snps <-  as.matrix(dat)
+snps[1:10, 1:10]
+dim(snps)
+
+# optional - get a subset of SNPs for faster analysis, then run on whole dataset
+#snps <- snps[, sample(1:ncol(snps), 10000, replace = F)]
+
+```
+
+
+## setup collection data
+
+```{r data_setup}
+
+# get info only for the ones we have SNP data for
+
+# first check for any mismatches
+rownames(snps)[! rownames(snps) %in% info$ID_vcf]
+
+# get subset
+info <- info[match(rownames(snps), info$ID_vcf),]
+
+# check
+cbind(rownames(snps), info$ID_vcf, rownames(info))
+
+# rename SNP rows to match corrected names (info rownames)
+rownames(snps) <- rownames(info)
+
+# also get species abbreviation from name
+info$sp <- sapply(1:nrow(snps), function(x) strsplit(rownames(snps)[x], split = '.', fixed = T)[[1]][1])
+info$sp <- factor(info$sp)
+
+
+
+```
+
+# impute SNP data
+
+```{r impute}
+
+# need to impute missing data
+
+# proportion missing data - about 5%
+sum(is.na(snps))/length(unlist(snps))
+
+# missing data by individual
+sapply(1:nrow(snps), function(x) sum(is.na(snps[x,])))
+miss <- sapply(1:nrow(snps), function(x) sum(is.na(snps[x,]))/ncol(snps))
+missdf <- cbind(rownames(snps), miss)
+missdf[order(missdf[,2]),]
+
+
+# impute by most common snp
+imp <- apply(snps, 2, function(x) replace(x, is.na(x), as.numeric(names(which.max(table(x))))))
+sum(is.na(imp))
+
+
+```
+
+```{r check}
+
+# one last check that rows are in the same order...
+cbind(rownames(info), rownames(snps), rownames(imp))
+
+```
+
+
+# Plots
+
+## Simple PCA, all samples
+
+Uses vegan rda() function without constraining matrices, which just runs a PCA
+
+From documentation: "If both matrices Z and Y are missing, the data matrix is analysed by ordinary correspondence analysis (or principal components analysis)."
+
+```{r PCA_all_samples}
+
+# run the redundancy analysis
+
+rda <- rda(imp, scale = T)
+
+rda
+#summary(rda)
+screeplot(rda)
+
+# save summary
+rda.info <- summary(rda)
+rda.info$sites
+
+# plot the individuals ('sites')
+
+# set params
+par(cex.axis = 1.2, cex.lab = 1.5)
+par(mar = c(5,5,3,1))
+
+# setup colors and points
+
+# color by island
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# point shape by species
+sp <- c(23, 22, 21)
+
+
+#png(filename = 'results/pca/PCA_allSamples_axes1-2.png', res = 300, height = 5.5, width = 6, units = 'in')
+#pdf(file = 'results/pca/PCA_allSamples_axes1-2.pdf', height = 5.5, width = 6)
+
+par(cex.axis = 1.2, cex.lab = 1.5)
+par(mar = c(5,5,3,1))
+
+# PC1 and PC2
+choices = c(1,2)
+
+# x and ylab code is ugly, but it's just pulling the variance explained from the RDA summary for each axis
+plot(rda, 
+     type = 'n', 
+     choices = choices,
+     xlab = paste('PC', choices[1], ' (', round(rda.info$cont$importance[2, choices[1]], 3)*100, '% variance explained)', sep = ''),
+     ylab = paste('PC', choices[2], ' (', round(rda.info$cont$importance[2, choices[2]], 3)*100, '% variance explained)', sep = ''))
+
+points(rda, pch = sp[info$sp], cex = 1.5, display = 'sites', bg = bg[info$island], col = 'black', choices = choices)
+
+legend('topleft', legend = c(levels(info$sp), levels(info$island)), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), bg), cex = 0.8)
+
+#dev.off()
+
+# PC1 and PC3
+
+#png(filename = 'results/pca/PCA_allSamples_axes1-3.png', res = 300, height = 5.5, width = 6, units = 'in')
+#pdf(file = 'results/pca/PCA_allSamples_axes1-3.pdf', height = 5.5, width = 6)
+
+par(cex.axis = 1.2, cex.lab = 1.5)
+par(mar = c(5,5,3,1))
+
+choices = c(1,3)
+plot(rda, 
+     type = 'n', 
+     choices = choices,
+     xlab = paste('PC', choices[1], ' (', round(rda.info$cont$importance[2, choices[1]], 3)*100, '% variance explained)', sep = ''),
+     ylab = paste('PC', choices[2], ' (', round(rda.info$cont$importance[2, choices[2]], 3)*100, '% variance explained)', sep = ''))
+
+points(rda, pch = sp[info$sp], cex = 1.5, display = 'sites', bg = bg[info$island], col = 'black', choices = choices)
+
+#legend('topleft', legend = c(levels(info$sp), levels(info$island)), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), bg), cex = 1.2)
+
+#dev.off()
+
+
+```
+
+
+## Only Channel Islands, exclude Guadalupe Island
+
+```{r rda_subset_california}
+
+# plot without guadalupe island
+
+imp.sub <- imp[! info$island %in% c("Guadalupe Island"),]
+info.sub <- info[! info$island %in% c("Guadalupe Island"),]
+
+rda <- rda(imp.sub, scale = T)
+
+rda
+#summary(rda)
+screeplot(rda)
+
+# save summary
+rda.info <- summary(rda)
+rda.info$sites
+
+# plot the individuals ('sites')
+
+# set params
+par(cex.axis = 1.2, cex.lab = 1.5)
+par(mar = c(5,5,3,1))
+
+# setup colors and points
+
+# color by island
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404")
+
+# point shape by species
+sp <- c(23, 22, 21)
+
+
+# png(filename = 'results/pca/PCA_California_axes1-2.png', res = 300, height = 5.5, width = 6, units = 'in')
+# pdf(file = 'results/pca/PCA_California_axes1-2.pdf', height = 5.5, width = 6)
+
+
+par(cex.axis = 1.2, cex.lab = 1.5)
+par(mar = c(5,5,3,1))
+
+# PC1 and PC2
+choices = c(1,2)
+
+# x and ylab code is ugly, but it's just pulling the variance explained from the RDA summary for each axis
+plot(rda, 
+     type = 'n', 
+     choices = choices,
+     xlab = paste('PC', choices[1], ' (', round(rda.info$cont$importance[2, choices[1]], 3)*100, '% variance explained)', sep = ''),
+     ylab = paste('PC', choices[2], ' (', round(rda.info$cont$importance[2, choices[2]], 3)*100, '% variance explained)', sep = ''))
+
+points(rda, pch = sp[info.sub$sp], cex = 1.5, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+
+#legend('topleft', legend = c(levels(info$sp), levels(info$island)), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), bg), cex = 0.8)
+
+#dev.off()
+
+# PC1 and PC3
+
+# png(filename = 'results/pca/PCA_California_axes1-3.png', res = 300, height = 5.5, width = 6, units = 'in')
+# pdf(file = 'results/pca/PCA_California_axes1-3.pdf', height = 5.5, width = 6)
+
+par(cex.axis = 1.2, cex.lab = 1.5)
+par(mar = c(5,5,3,1))
+
+choices = c(1,3)
+plot(rda, 
+     type = 'n', 
+     choices = choices,
+     xlab = paste('PC', choices[1], ' (', round(rda.info$cont$importance[2, choices[1]], 3)*100, '% variance explained)', sep = ''),
+     ylab = paste('PC', choices[2], ' (', round(rda.info$cont$importance[2, choices[2]], 3)*100, '% variance explained)', sep = ''))
+
+points(rda, pch = sp[info.sub$sp], cex = 1.5, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+
+#legend('topleft', legend = c(levels(info$sp), levels(info$island)), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), bg), cex = 1.2)
+
+#dev.off()
+
+```
+
+## Only Northern Channel Islands
+
+```{r rda_subset_northern_islands}
+
+# plot just SRI and SCI for easier comparison with Qagr data
+
+imp.sub <- imp[info$island %in% c("Mainland", "Santa Rosa Island", "Santa Cruz Island"),]
+info.sub <- info[info$island %in% c("Mainland", "Santa Rosa Island", "Santa Cruz Island"),]
+
+rda <- rda(imp.sub, scale = T)
+
+rda
+#summary(rda)
+screeplot(rda)
+
+# plots
+
+# setup colors and points
+
+# color by island
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# point shape by species
+sp <- c(23, 22, 21)
+#sp <- c(5, 0, 1)
+
+# PC1 and PC2
+#png(file = 'results/redundancy_analysis/rda_plot_indivs_clim_Qtom107.Qchr17.Qssp3_SantaRosa_SantaCruz_Mainland_PC1_PC2.png', height = 6, width = 6, res = 300, units = 'in')
+choices = c(1,2)
+plot(rda, type = 'n', choices = choices)
+points(rda, pch = sp[info.sub$sp], cex = 1, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+#points(rda, pch = sp[info.sub$sp], cex = 2, display = 'sites', col = bg[info.sub$island], choices = choices)
+legend('bottomleft', legend = c(levels(info.sub$sp), "Mainland Qchr", "Santa Rosa Island", "Santa Cruz Island"), pch = c(sp, rep(15, 8)), col = c(rep('black', 4), "#3c4a8b","#009c85"), cex = 1)
+#dev.off()
+
+
+# PC1 and PC3
+#png(file = 'results/redundancy_analysis/rda_plot_indivs_clim_Qtom107.Qchr17.Qssp3_SantaRosa_SantaCruz_Mainland_PC1_PC3.png', height = 6, width = 6, res = 300, units = 'in')
+choices = c(1,3)
+plot(rda, type = 'n', choices = choices)
+points(rda, pch = sp[info.sub$sp], cex = 1, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+#dev.off()
+
+###########################
+# no mainland
+
+imp.sub <- imp[info$island %in% c("Santa Rosa Island", "Santa Cruz Island"),]
+info.sub <- info[info$island %in% c("Santa Rosa Island", "Santa Cruz Island"),]
+
+rda <- rda(imp.sub, scale = T)
+
+rda
+#summary(rda)
+screeplot(rda)
+
+# plots
+
+# setup colors and points
+
+# color by island
+bg <- c('black', "#3c4a8b","#009c85","#84bc5f","#edb829","#f57404","#b30000")
+
+# point shape by species
+sp <- c(23, 22, 21)
+#sp <- c(5, 0, 1)
+
+# PC1 and PC2
+#png(file = 'results/redundancy_analysis/rda_plot_indivs_clim_Qtom107.Qchr17.Qssp3_SantaRosa_SantaCruz_PC1_PC2.png', height = 6, width = 6, res = 300, units = 'in')
+choices = c(1,2)
+plot(rda, type = 'n', choices = choices)
+points(rda, pch = sp[info.sub$sp], cex = 1, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+#points(rda, pch = sp[info.sub$sp], cex = 2, display = 'sites', col = bg[info.sub$island], choices = choices)
+legend('topleft', legend = c(levels(info.sub$sp), "Mainland Qchr", "Santa Rosa Island", "Santa Cruz Island"), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), "#3c4a8b","#009c85"), cex = 1)
+#dev.off()
+
+
+# PC1 and PC3
+#png(file = 'results/redundancy_analysis/rda_plot_indivs_clim_Qtom107.Qchr17.Qssp3_SantaRosa_SantaCruz_PC1_PC3.png', height = 6, width = 6, res = 300, units = 'in')
+choices = c(1,3)
+plot(rda, type = 'n', choices = choices)
+points(rda, pch = sp[info.sub$sp], cex = 1, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+#dev.off()
+
+# combined fig
+
+#png(file = 'results/redundancy_analysis/rda_plot_indivs_clim_Qtom107.Qchr17.Qssp3_SantaRosa_SantaCruz_PC1-PC3.png', height = 6, width = 12, res = 300, units = 'in')
+par(mfrow = c(1,2))
+choices = c(1,2)
+plot(rda, type = 'n', choices = choices, main = substitute(paste(italic("Q. tomentella"))))
+points(rda, pch = sp[info.sub$sp], cex = 1, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+
+legend('bottomright', legend = c(levels(info.sub$sp), "Santa Rosa Island", "Santa Cruz Island"), pch = c(sp, rep(15, 8)), col = c(rep('black', 3), "#3c4a8b","#009c85"), cex = 0.8)
+
+
+# PC1 and PC3
+choices = c(1,3)
+plot(rda, type = 'n', choices = choices)
+points(rda, pch = sp[info.sub$sp], cex = 1, display = 'sites', bg = bg[info.sub$island], col = 'black', choices = choices)
+
+#dev.off()
+
+```
