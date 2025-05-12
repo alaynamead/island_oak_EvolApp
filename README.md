@@ -1,6 +1,8 @@
 # Island Oak landscape genomics analysis
 Code from "Comparison of conservation strategies for California Channel Island Oak *(Quercus tomentella)* using climate suitability predicted from genomic data"
 
+Published article: https://onlinelibrary.wiley.com/doi/full/10.1111/eva.70057
+
 Rmarkdown files with outputs (including plots) are available as supplementary information for the manuscript and at Dryad. Input data used in scripts are also available at Dryad.
 
 Scripts are listed below in the order that they should be run.
